@@ -20,7 +20,7 @@ import { existsSync } from "node:fs";
 import { resolveWorkspace, getCoreSizeLimit, DEFAULT_TOP_K, MAX_TOP_K } from "./lib/paths.js";
 import { readCore, writeCore, dotGet, dotSet, autoParse } from "./lib/core.js";
 import { loadArchival, appendRecord, rewriteArchival, archivalPath } from "./lib/archival.js";
-import { indexEmbedding, loadEmbeddingCache, saveEmbeddingCache } from "./lib/embedding.js";
+import { indexEmbedding, loadEmbeddingCache, saveEmbeddingCache, backfillEmbeddings } from "./lib/embedding.js";
 import { hybridSearch } from "./lib/search.js";
 import { consolidateText } from "./lib/consolidate.js";
 import { findDuplicates, applyDedup } from "./lib/dedup.js";
@@ -94,6 +94,26 @@ export default definePluginEntry({
     // This enables per-agent workspace resolution for multi-workspace setups.
     // Factory ctx has: { sessionKey, workspaceDir, agentId, ... }
     // ═══════════════════════════════════════════════════════════════════
+
+    // Background: auto-backfill missing embeddings on startup
+    const defaultWs = resolveWorkspace(null);
+    setTimeout(() => {
+      try {
+        const records = loadArchival(defaultWs);
+        const cache = loadEmbeddingCache(defaultWs);
+        const missing = records.filter((r) => r.id && !cache[r.id]).length;
+        if (missing > 0) {
+          console.error(`[memory-engine] Backfilling ${missing} missing embeddings...`);
+          backfillEmbeddings(defaultWs, records, {
+            onProgress: (done, total) => {
+              if (done % 500 === 0) console.error(`[memory-engine] Embedding backfill: ${done}/${total}`);
+            },
+          }).then((result) => {
+            console.error(`[memory-engine] Backfill complete: ${result.processed} embedded, ${result.errors} errors`);
+          }).catch(() => {});
+        }
+      } catch { /* ignore startup errors */ }
+    }, 10000); // delay 10s after gateway start to avoid blocking
 
     // ─── core_memory_read ───
     api.registerTool(withAgent((agentId) => ({
