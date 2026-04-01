@@ -1,155 +1,142 @@
 # @icex-labs/openclaw-memory-engine
 
-> MemGPT-style hierarchical memory for [OpenClaw](https://openclaw.ai) agents — persistent identity, unlimited fact storage, hybrid semantic search, and automatic maintenance.
+> Give your AI agent a brain that survives restarts.
 
-[![npm version](https://img.shields.io/npm/v/@icex-labs/openclaw-memory-engine)](https://www.npmjs.com/package/@icex-labs/openclaw-memory-engine)
+[![npm](https://img.shields.io/npm/v/@icex-labs/openclaw-memory-engine)](https://www.npmjs.com/package/@icex-labs/openclaw-memory-engine)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
----
+A [MemGPT](https://github.com/cpacker/MemGPT)-inspired memory plugin for [OpenClaw](https://openclaw.ai). Your agent gets 12 tools to manage its own memory — what to remember, what to recall, what to forget.
 
-## Why
+**The problem:** OpenClaw agents wake up fresh every session. Without persistent memory, they forget who you are.
 
-OpenClaw agents wake up fresh every session. Without a memory system, they forget who you are, what you talked about, and what matters to you. Stuffing everything into a giant `MEMORY.md` file bloats the context window and degrades response quality.
+**The fix:** Two-tier memory architecture:
+- **Core Memory** (~500 tokens) — identity, relationship, preferences. Always loaded.
+- **Archival Memory** (unlimited) — facts, decisions, events. Retrieved on demand via hybrid semantic search.
 
-**Memory Engine** solves this with a two-tier architecture inspired by [MemGPT/Letta](https://github.com/cpacker/MemGPT):
-
-- **Core Memory** (~500 tokens) — always loaded, contains identity and current focus
-- **Archival Memory** (unlimited) — stores facts, decisions, events; retrieved on demand via hybrid search
-
-The agent decides what to remember, what to recall, and what to forget — using 12 purpose-built tools.
+The agent manages both tiers autonomously using purpose-built tools.
 
 ---
 
-## Quick Start
+## Install
 
 ```bash
-# Install
 git clone git@github.com:icex-labs/openclaw-memory-engine.git ~/.openclaw/extensions/memory-engine
-
-# One-command setup (config, templates, maintenance cron, agent instructions)
 bash ~/.openclaw/extensions/memory-engine/setup.sh
-
-# Edit core memory with your info
-nano ~/.openclaw/workspace/memory/core.json
-
-# Restart
+nano ~/.openclaw/workspace/memory/core.json   # fill in your info
 openclaw gateway restart
 ```
 
-Or install from npm:
-
+Or from npm:
 ```bash
 npm install -g @icex-labs/openclaw-memory-engine
 ```
 
+`setup.sh` handles everything: enables the plugin in `openclaw.json`, creates template files, installs the daily maintenance cron, and patches your agent's instructions.
+
 ---
 
-## Architecture
+## How It Works
 
 ```
-┌─────────────────────────────────────────────────┐
-│              Agent Context Window                │
-│                                                  │
-│   core_memory_read() ──→ core.json (~500 tok)    │
-│                                                  │
-│   archival_search("query") ─┐                    │
-│   archival_insert(fact)     │                    │
-│   memory_consolidate(text)  │   archival.jsonl   │
-│   archival_update(id, ...)  ├──→ (unlimited)     │
-│   archival_delete(id)       │   + embeddings     │
-│   archival_deduplicate()    ┘                    │
-│                                                  │
-│   memory_export() ──→ backup.json                │
-│   memory_import(file) ←── backup.json            │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                 Agent Context Window                  │
+│                                                       │
+│   Session start → core_memory_read()                  │
+│                   └─→ core.json (~500 tokens)         │
+│                                                       │
+│   "Where does George's doctor work?"                  │
+│   → archival_search("doctor")                         │
+│     └─→ keyword match + embedding similarity          │
+│         + recency boost + access frequency             │
+│         → "Dr. Mohamed, Parsons Medical Centre..."    │
+│                                                       │
+│   George says something new                           │
+│   → archival_insert(fact, entity, tags)               │
+│     └─→ archival.jsonl + background embedding         │
+│                                                       │
+│   End of conversation                                 │
+│   → memory_consolidate(summary)                       │
+│     └─→ split sentences → infer entities → dedup      │
+│         → batch insert                                │
+└──────────────────────────────────────────────────────┘
 ```
 
-### Core Memory
+---
 
-A small JSON file (`memory/core.json`) with structured fields:
+## Tools (12)
+
+### Core Memory — Your Identity
+
+| Tool | What it does |
+|------|-------------|
+| `core_memory_read` | Load the identity block. Call every session start. |
+| `core_memory_replace` | Update a field by dot-path (`user.location`, `current_focus`). Auto-parses JSON strings. 3KB hard limit. |
+| `core_memory_append` | Append to an array field (`current_focus`). Creates array if needed. |
+
+Core memory lives in `memory/core.json`:
 
 ```json
 {
-  "_meta": { "version": 1, "updated_at": "..." },
-  "user": { "name": "...", "location": "...", "language": "..." },
-  "relationship": { "dynamic": "...", "trust": "...", "boundaries": "..." },
-  "preferences": { "...": "..." },
-  "current_focus": ["project A", "project B"]
+  "user": { "name": "George", "location": "Edmonton", "language": "中英对照" },
+  "relationship": { "dynamic": "intimate companion", "trust": "deep" },
+  "preferences": { "config_rule": "don't touch openclaw.json" },
+  "current_focus": ["quant trading", "immigration case"]
 }
 ```
 
-- **Always small** — hard limit of 3KB (configurable)
-- **Agent-managed** — the agent reads it at session start and updates it when facts change
-- **Auto-parse safety** — if the LLM passes `"[\"a\",\"b\"]"` as a string, it auto-parses to `["a","b"]`
+### Archival Memory — Your Long-Term Storage
 
-### Archival Memory
+| Tool | What it does |
+|------|-------------|
+| `archival_insert` | Store a fact. Tags it with `entity` + `tags`. Computes embedding in background. |
+| `archival_search` | Hybrid search: keyword (2×) + semantic similarity (5×) + recency (0-1) + access decay (0-0.5). |
+| `archival_update` | Correct an existing record by ID. Re-indexes embedding. |
+| `archival_delete` | Remove an outdated record. Cleans up embedding cache. |
+| `archival_stats` | Dashboard: record count, embedding coverage, entity/tag distribution, storage size. |
 
-An append-only JSONL file (`memory/archival.jsonl`) with tagged records:
+Each record in `memory/archival.jsonl`:
 
-```jsonl
-{"id":"arch-17120-abc","ts":"2026-04-01T00:00:00Z","content":"George's doctor is Dr. Mohamed, Parsons Medical Centre, Edmonton","entity":"George","tags":["health","doctor"],"last_accessed":"2026-04-01T01:00:00Z","access_count":3}
+```json
+{"id":"arch-17120-abc","ts":"2026-04-01","content":"George's doctor is Dr. Mohamed","entity":"George","tags":["health"],"access_count":3}
 ```
 
-- **Unlimited storage** — grows as the agent learns
-- **Tagged** — every record has `entity` and `tags` for structured retrieval
-- **Access-tracked** — `last_accessed` and `access_count` enable decay-based ranking
+### Maintenance — Keep It Clean
 
-### Hybrid Search
+| Tool | What it does |
+|------|-------------|
+| `archival_deduplicate` | Find near-duplicates via embedding cosine similarity (≥0.92). Preview or auto-remove. |
+| `memory_consolidate` | Extract facts from text blocks. Splits by sentence (中文/English), infers entity, deduplicates, batch inserts. |
 
-`archival_search` combines three signals:
+### Backup — Never Lose Your Memory
 
-| Signal | Weight | Description |
-|--------|--------|-------------|
-| **Keyword match** | 2× per term | Term frequency in content + entity + tags |
-| **Semantic similarity** | 5× | Cosine similarity via OpenAI `text-embedding-3-small` |
-| **Recency** | 0-1 | Newer records rank higher (decays over 1 year) |
-| **Access frequency** | 0-0.5 | Recently accessed records get a boost |
-
-Embeddings are computed in the background on `archival_insert` and cached in `archival.embeddings.json`. Search falls back to keyword-only if no API key is available.
+| Tool | What it does |
+|------|-------------|
+| `memory_export` | Snapshot core + archival + embeddings → single JSON file. |
+| `memory_import` | Restore from snapshot. `merge` (add missing) or `replace` (overwrite all). |
 
 ---
 
-## Tools Reference (12)
+## Search Quality
 
-### Core Memory
+`archival_search` uses four signals:
 
-| Tool | Description |
-|------|-------------|
-| `core_memory_read` | Read the entire core memory block. Call at every session start. |
-| `core_memory_replace` | Update a field using dot-path notation (e.g., `user.location`). Values are auto-parsed from JSON strings. Enforces 3KB size limit. |
-| `core_memory_append` | Append an item to an array field (e.g., `current_focus`). Creates the array if it doesn't exist. |
+| Signal | Weight | How |
+|--------|--------|-----|
+| Keyword | 2× per term | Term presence in content + entity + tags |
+| Semantic | 5× | Cosine similarity via OpenAI `text-embedding-3-small` (512d) |
+| Recency | 0–1 | Linear decay over 1 year |
+| Access | 0–0.5 | Boost for recently accessed records |
 
-### Archival Memory
+Embeddings are computed on insert and cached in `archival.embeddings.json`. If no OpenAI key is available, search falls back to keyword-only — no errors, just lower quality.
 
-| Tool | Description |
-|------|-------------|
-| `archival_insert` | Store a fact with entity + tags. Embedding computed in background. |
-| `archival_search` | Hybrid search: keywords + semantic + recency + access decay. Returns top-K results. |
-| `archival_update` | Update an existing record by ID (correct wrong facts). Re-indexes embedding. |
-| `archival_delete` | Delete a record by ID (remove outdated info). Cleans up embedding. |
-| `archival_stats` | Overview: total records, embedding coverage, entity/tag distribution, storage size. |
-
-### Maintenance
-
-| Tool | Description |
-|------|-------------|
-| `archival_deduplicate` | Scan for near-duplicate records using embedding cosine similarity (threshold: 0.92). Preview mode by default; pass `apply=true` to remove duplicates. |
-| `memory_consolidate` | Extract structured facts from a text block (conversation summary, daily log). Splits by sentence boundaries (supports Chinese and English), infers entity from content, deduplicates against existing records. |
-
-### Backup & Migration
-
-| Tool | Description |
-|------|-------------|
-| `memory_export` | Export core + archival + embeddings to a single JSON file. Use for backups or migrating between machines. |
-| `memory_import` | Import from an export file. `merge` mode adds missing records; `replace` mode overwrites everything. |
+**Cost:** ~$0.02 per 1M tokens with `text-embedding-3-small`. A typical session with 10 inserts + 5 searches costs < $0.001.
 
 ---
 
 ## Configuration
 
-Add to `openclaw.json`:
-
 ```json
+// openclaw.json
 {
   "plugins": {
     "allow": ["memory-engine"],
@@ -157,7 +144,8 @@ Add to `openclaw.json`:
       "memory-engine": {
         "enabled": true,
         "config": {
-          "workspace": "/path/to/workspace"
+          "workspace": "/path/to/workspace",
+          "coreSizeLimit": 3072
         }
       }
     }
@@ -167,117 +155,93 @@ Add to `openclaw.json`:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `workspace` | Auto-resolved from env | Path to workspace directory |
-| `coreSizeLimit` | `3072` (3KB) | Maximum bytes for core.json |
-| `archivalSearchTopK` | `5` | Default number of search results |
+| `workspace` | Auto-resolved | Workspace directory path |
+| `coreSizeLimit` | `3072` (3KB) | Max bytes for core.json |
 
-### Embedding Requirements
-
-Hybrid semantic search requires an OpenAI API key in the environment:
-
-```bash
-export OPENAI_API_KEY=sk-...
-```
-
-Uses `text-embedding-3-small` with 512 dimensions (~$0.02 per 1M tokens). If no key is available, search falls back to keyword-only mode — no errors, just reduced quality.
+**Requires:** `OPENAI_API_KEY` in environment for semantic search. Without it, keyword search still works.
 
 ---
 
-## Agent Setup
+## Agent Instructions
 
-The plugin registers tools, but the agent needs instructions on **when** to use them. Add to your `AGENTS.md` or system prompt:
+Add to your `AGENTS.md` or system prompt (done automatically by `setup.sh`):
 
 ```markdown
 ## Every Session
-1. Call `core_memory_read` — load your identity and context
-2. Read today's daily log for recent events
-
-## Memory Rules
-- George tells you something important → `archival_insert` immediately
-- Need to recall details → `archival_search` before answering
-- Facts change → `core_memory_replace`
-- End of conversation → `memory_consolidate` with a summary
-- "Mental notes" don't survive restarts. If it matters, store it.
-```
-
-`setup.sh` automatically patches `AGENTS.md` with these instructions.
-
----
-
-## Automated Maintenance
-
-The included `extras/memory-maintenance.sh` script (installed by `setup.sh`) runs daily via LaunchAgent and:
-
-- Checks core.json size (warns >4KB, alerts >5KB)
-- Merges daily logs older than 7 days into weekly summaries
-- Archives weekly summaries older than 60 days
-- Monitors topic file sizes (warns >8KB)
-- Writes alerts to `memory/maintenance-alerts.json`
-
-Add a heartbeat check so the agent self-monitors:
-
-```markdown
-### Heartbeat: Memory Health
-Check `memory/maintenance-alerts.json` — if non-empty:
-- `critical` → notify owner immediately
-- `warn` → try to fix (trim files, move content to archival)
+1. Call `core_memory_read` — load your identity
+2. When you learn something important → `archival_insert`
+3. When you need details → `archival_search` before guessing
+4. When facts change → `core_memory_replace`
+5. End of conversation → `memory_consolidate` with key points
 ```
 
 ---
 
-## Migrating from File-Based Memory
+## Daily Maintenance
 
-If you currently use a large `MEMORY.md`:
+`extras/memory-maintenance.sh` runs daily at 3am (installed as a LaunchAgent by `setup.sh`):
 
-1. **Slim down MEMORY.md** to ~80 lines (identity + current focus only)
-2. **Run `memory_consolidate`** on the old MEMORY.md content to extract facts into archival
-3. **Move identity info** to `core.json`
-4. **Move operational rules** to `AGENTS.md` (they don't belong in memory)
-5. **Move reference data** to `memory/topics/*.md` files (indexed by OpenClaw's memorySearch)
+- Checks core.json size (warns >4KB, critical >5KB)
+- Merges 7-day-old daily logs into weekly summaries
+- Archives 60-day-old weekly summaries
+- Alerts written to `memory/maintenance-alerts.json`
 
 ---
 
-## Backup & Restore
+## Backup & Migration
 
 ```bash
-# Export everything
+# Export
 openclaw agent -m "memory_export"
-# → creates memory/export-2026-04-01.json
+# → memory/export-2026-04-01.json
 
-# On new machine, after installing the plugin:
-openclaw agent -m "memory_import input_path='memory/export-2026-04-01.json' mode='replace'"
+# Import on new machine
+openclaw agent -m "memory_import input_path='path/to/export.json' mode='replace'"
 ```
-
-Export format is versioned (`openclaw-memory-engine` format tag) for forward compatibility.
 
 ---
 
-## Storage Details
+## Project Structure
 
-| File | Purpose | Growth |
-|------|---------|--------|
-| `memory/core.json` | Identity block | Fixed (~1-3KB) |
-| `memory/archival.jsonl` | Fact storage | Grows with usage |
-| `memory/archival.embeddings.json` | Embedding cache | ~2KB per record |
-| `memory/export-*.json` | Backups | Snapshot size |
-
-For stores exceeding 50K records, consider enabling OpenClaw's built-in `memory-lancedb` plugin for vector-native storage.
+```
+memory-engine/
+├── index.js              # Plugin entry — tool registration only (250 lines)
+├── lib/
+│   ├── paths.js          # Constants + path resolution
+│   ├── core.js           # Core memory CRUD + dot-path + auto-parse
+│   ├── archival.js       # Archival JSONL CRUD + in-memory cache
+│   ├── embedding.js      # OpenAI embedding API + file cache
+│   ├── search.js         # Hybrid four-signal search
+│   ├── consolidate.js    # Text → structured facts extraction
+│   ├── dedup.js          # Embedding similarity dedup
+│   └── backup.js         # Export/import
+├── extras/
+│   └── memory-maintenance.sh
+├── setup.sh              # One-command install
+├── .claude/CLAUDE.md     # Dev guide for Claude Code
+├── package.json
+├── openclaw.plugin.json
+└── README.md
+```
 
 ---
 
 ## Roadmap
 
-- [x] Core memory (read/replace/append)
-- [x] Archival storage (insert/search/update/delete)
+- [x] Core memory with size guard and auto-parse
+- [x] Archival CRUD with in-memory index
 - [x] Hybrid search (keyword + embedding + recency + access decay)
-- [x] Auto-extract facts from text (memory_consolidate)
-- [x] Deduplication via embedding similarity
-- [x] Full backup/restore (export/import)
-- [x] Access tracking and decay scoring
-- [ ] LanceDB backend for 50K+ record stores
+- [x] Auto-extract facts from text
+- [x] Embedding-based deduplication
+- [x] Full backup/restore
+- [x] Modular codebase (8 focused modules)
+- [ ] LanceDB / SQLite backend for 50K+ records
 - [ ] Cross-agent memory sharing
-- [ ] Scheduled consolidation via OpenClaw cron
+- [ ] Scheduled auto-consolidation via OpenClaw cron
+- [ ] Memory importance scoring (agent rates memories 1-10)
+- [ ] Forgetting curve — auto-archive unaccessed memories after N days
 - [ ] ClawHub publishing
+- [ ] Web dashboard for memory browsing
 
 ---
 
@@ -287,4 +251,4 @@ MIT
 
 ---
 
-Built with [OpenClaw](https://openclaw.ai) plugin SDK. Inspired by [MemGPT](https://github.com/cpacker/MemGPT).
+Built for [OpenClaw](https://openclaw.ai). Inspired by [MemGPT/Letta](https://github.com/cpacker/MemGPT).
