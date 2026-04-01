@@ -1,12 +1,13 @@
 /**
- * @icex-labs/openclaw-memory-engine v1.1.0
+ * @icex-labs/openclaw-memory-engine v1.2.0
  *
  * MemGPT-style hierarchical memory plugin for OpenClaw.
  *
- * Tools:
- *   Core:     core_memory_read, core_memory_replace, core_memory_append
- *   Archival: archival_insert, archival_search, archival_update, archival_delete, archival_stats
- *   Maintenance: archival_deduplicate
+ * Tools (12):
+ *   Core:        core_memory_read, core_memory_replace, core_memory_append
+ *   Archival:    archival_insert, archival_search, archival_update, archival_delete, archival_stats
+ *   Maintenance: archival_deduplicate, memory_consolidate
+ *   Backup:      memory_export, memory_import
  *
  * Features:
  *   - Hybrid search: keyword matching + OpenAI embedding cosine similarity
@@ -14,6 +15,8 @@
  *   - Access tracking + recency decay for archival search
  *   - In-memory index for fast search over large stores
  *   - Deduplication tool for cleaning similar records
+ *   - Auto-extract facts from text (memory_consolidate)
+ *   - Full backup/restore with export/import
  *   - Size-guarded core memory (default 3KB)
  */
 
@@ -651,6 +654,272 @@ export default definePluginEntry({
         return {
           content: [{ type: "text", text: `Found ${dupes.length} potential duplicates (preview only, call with apply=true to remove):\n\n${preview}` }],
         };
+      },
+    });
+
+    // ─── memory_consolidate (P3: auto-extract) ───
+    api.registerTool({
+      name: "memory_consolidate",
+      description: [
+        "Extract and store structured facts from a block of text (conversation summary, daily log, etc.).",
+        "Parses the text into individual facts, deduplicates against existing archival, and inserts new ones.",
+        "Use at end of conversations or during heartbeats to consolidate learnings.",
+        "Pass the text you want to extract facts from — the tool handles parsing, tagging, and dedup.",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          text: {
+            type: "string",
+            description: "Raw text to extract facts from (conversation summary, daily log content, etc.)",
+          },
+          default_entity: {
+            type: "string",
+            description: "Default entity to assign if not obvious from text (e.g., 'George')",
+          },
+          default_tags: {
+            type: "array",
+            items: { type: "string" },
+            description: "Default tags to apply to extracted facts",
+          },
+        },
+        required: ["text"],
+        additionalProperties: false,
+      },
+      async execute(_id, params, ctx) {
+        const ws = resolveWorkspace(ctx);
+        const text = params.text;
+        const defaultEntity = params.default_entity || "";
+        const defaultTags = params.default_tags || [];
+
+        // Split text into fact-like chunks:
+        // 1. By newline
+        // 2. By Chinese/English sentence boundaries (。.！!？?)
+        // 3. By semicolons and explicit separators
+        const rawLines = text.split(/\n/).map((l) => l.trim()).filter(Boolean);
+        const segments = [];
+        for (const line of rawLines) {
+          // Further split long lines by sentence boundaries
+          const sentences = line.split(/(?<=[。.！!？?；;])\s*/).map((s) => s.trim()).filter(Boolean);
+          if (sentences.length > 1) {
+            segments.push(...sentences);
+          } else {
+            segments.push(line);
+          }
+        }
+        const factCandidates = [];
+        for (const seg of segments) {
+          // Skip headers, timestamps, very short segments
+          if (seg.startsWith("#") || seg.length < 10) continue;
+          // Strip markdown bullet prefixes
+          const clean = seg.replace(/^[-*•]\s*/, "").replace(/^\d+\.\s*/, "").trim();
+          if (clean.length < 10) continue;
+          // Skip section headers or metadata
+          if (/^(##|===|---|\*\*\*)/.test(clean)) continue;
+          factCandidates.push(clean);
+        }
+
+        if (factCandidates.length === 0) {
+          return { content: [{ type: "text", text: "No extractable facts found in the provided text." }] };
+        }
+
+        // Deduplicate against existing archival using keyword overlap
+        const existing = loadArchival(ws);
+        const existingTexts = existing.map((r) => (r.content || "").toLowerCase());
+        const inserted = [];
+        const skipped = [];
+
+        for (const fact of factCandidates) {
+          const factLower = fact.toLowerCase();
+          // Check for high keyword overlap with existing records
+          let isDupe = false;
+          for (const ex of existingTexts) {
+            const factWords = new Set(factLower.split(/\s+/).filter((w) => w.length > 2));
+            const exWords = new Set(ex.split(/\s+/).filter((w) => w.length > 2));
+            let overlap = 0;
+            for (const w of factWords) { if (exWords.has(w)) overlap++; }
+            const overlapRatio = factWords.size > 0 ? overlap / factWords.size : 0;
+            if (overlapRatio > 0.7) { isDupe = true; break; }
+          }
+
+          if (isDupe) {
+            skipped.push(fact.slice(0, 60));
+            continue;
+          }
+
+          // Infer entity from content
+          let entity = defaultEntity;
+          const entityPatterns = [
+            [/\b(George|虾米哥)\b/i, "George"],
+            [/\b(Jane|甄玉)\b/i, "Jane"],
+            [/\b(Lawrence|Xuanqi)\b/i, "Lawrence"],
+            [/\b(Tracy)\b/i, "Tracy"],
+            [/\b(IBKR|Interactive Brokers)\b/i, "IBKR"],
+            [/\b(GX550|Escalade|ES350|Lexus|Cadillac)\b/i, "vehicles"],
+            [/\b(immigration|PR|IRCC|CBSA)\b/i, "immigration"],
+            [/\b(quant|trading|backtest)\b/i, "netralis-quant"],
+            [/\b(OpenClaw|gateway|plugin)\b/i, "OpenClaw"],
+          ];
+          for (const [pat, name] of entityPatterns) {
+            if (pat.test(fact)) { entity = name; break; }
+          }
+
+          const record = appendRecord(ws, {
+            content: fact,
+            entity,
+            tags: defaultTags,
+            source: "consolidate",
+          });
+          indexEmbedding(ws, record).catch(() => {});
+          inserted.push(record.id);
+          existingTexts.push(factLower); // prevent self-dedup within batch
+        }
+
+        const text_out = [
+          `Extracted ${factCandidates.length} candidates, inserted ${inserted.length}, skipped ${skipped.length} (duplicate).`,
+          inserted.length > 0 ? `\nInserted IDs: ${inserted.join(", ")}` : "",
+          skipped.length > 0 ? `\nSkipped (dupes): ${skipped.map((s) => `"${s}..."`).join(", ")}` : "",
+        ].filter(Boolean).join("");
+
+        return { content: [{ type: "text", text: text_out }] };
+      },
+    });
+
+    // ─── memory_export (P4: backup) ───
+    api.registerTool({
+      name: "memory_export",
+      description:
+        "Export the entire memory system (core + archival + embeddings) to a single JSON file for backup or migration. Returns the export file path.",
+      parameters: {
+        type: "object",
+        properties: {
+          output_path: {
+            type: "string",
+            description: "Output file path (default: memory/export-YYYY-MM-DD.json)",
+          },
+        },
+        additionalProperties: false,
+      },
+      async execute(_id, params, ctx) {
+        const ws = resolveWorkspace(ctx);
+        const date = new Date().toISOString().slice(0, 10);
+        const outPath = params.output_path || join(ws, "memory", `export-${date}.json`);
+
+        const core = readCore(ws);
+        const records = loadArchival(ws);
+        const embeddings = loadEmbeddingCache(ws);
+
+        const exportData = {
+          _meta: {
+            format: "openclaw-memory-engine",
+            version: "1.2.0",
+            exported_at: new Date().toISOString(),
+            workspace: ws,
+          },
+          core,
+          archival: records,
+          embeddings,
+          stats: {
+            core_size: JSON.stringify(core).length,
+            archival_count: records.length,
+            embedding_count: Object.keys(embeddings).length,
+          },
+        };
+
+        writeFileSync(outPath, JSON.stringify(exportData, null, 2), "utf-8");
+        const sizeKB = (JSON.stringify(exportData).length / 1024).toFixed(1);
+
+        return {
+          content: [{
+            type: "text",
+            text: `OK: Exported to ${outPath} (${sizeKB}KB)\n  Core: ${exportData.stats.core_size}B\n  Archival: ${exportData.stats.archival_count} records\n  Embeddings: ${exportData.stats.embedding_count}`,
+          }],
+        };
+      },
+    });
+
+    // ─── memory_import (P4: restore) ───
+    api.registerTool({
+      name: "memory_import",
+      description:
+        "Import a memory export file. Modes: 'replace' (overwrite all) or 'merge' (add missing records, keep existing). Use for restoring backups or migrating between machines.",
+      parameters: {
+        type: "object",
+        properties: {
+          input_path: {
+            type: "string",
+            description: "Path to the export JSON file",
+          },
+          mode: {
+            type: "string",
+            description: "'replace' (overwrite everything) or 'merge' (add missing, keep existing). Default: merge",
+          },
+        },
+        required: ["input_path"],
+        additionalProperties: false,
+      },
+      async execute(_id, params, ctx) {
+        const ws = resolveWorkspace(ctx);
+        const mode = params.mode || "merge";
+
+        if (!existsSync(params.input_path)) {
+          return { content: [{ type: "text", text: `ERROR: File not found: ${params.input_path}` }] };
+        }
+
+        let importData;
+        try {
+          importData = JSON.parse(readFileSync(params.input_path, "utf-8"));
+        } catch (e) {
+          return { content: [{ type: "text", text: `ERROR: Invalid JSON: ${e.message}` }] };
+        }
+
+        if (importData._meta?.format !== "openclaw-memory-engine") {
+          return { content: [{ type: "text", text: `ERROR: Not a memory-engine export file.` }] };
+        }
+
+        let result;
+
+        if (mode === "replace") {
+          // Full replace
+          if (importData.core) writeCore(ws, importData.core);
+          if (importData.archival) rewriteArchival(ws, importData.archival);
+          if (importData.embeddings) {
+            embeddingCache.set(ws, importData.embeddings);
+            saveEmbeddingCache(ws);
+          }
+          result = `REPLACED: core + ${importData.archival?.length || 0} archival records + ${Object.keys(importData.embeddings || {}).length} embeddings`;
+        } else {
+          // Merge: add records with new IDs, skip existing content
+          const existing = loadArchival(ws);
+          const existingContents = new Set(existing.map((r) => r.content));
+          const importRecords = importData.archival || [];
+
+          let added = 0;
+          for (const r of importRecords) {
+            if (!existingContents.has(r.content)) {
+              appendRecord(ws, { content: r.content, entity: r.entity, tags: r.tags, source: "import" });
+              existingContents.add(r.content);
+              added++;
+            }
+          }
+
+          // Merge embeddings
+          if (importData.embeddings) {
+            const embCache = loadEmbeddingCache(ws);
+            let embAdded = 0;
+            for (const [id, emb] of Object.entries(importData.embeddings)) {
+              if (!embCache[id]) { embCache[id] = emb; embAdded++; }
+            }
+            saveEmbeddingCache(ws);
+            result = `MERGED: ${added} new records (${importRecords.length - added} skipped as duplicates), ${embAdded} new embeddings`;
+          } else {
+            result = `MERGED: ${added} new records (${importRecords.length - added} skipped as duplicates)`;
+          }
+
+          // Don't overwrite core in merge mode — user's current core is authoritative
+        }
+
+        return { content: [{ type: "text", text: `OK: ${result}` }] };
       },
     });
   },
