@@ -106,6 +106,40 @@ else
   echo "⏭️  archival.jsonl already exists ($lines records)"
 fi
 
+# --- 3b. Migrate legacy memory files into archival ---
+if command -v node &>/dev/null && [ -f "$PLUGIN_DIR/extras/migrate-legacy.mjs" ]; then
+  # Check if there are legacy files to migrate
+  legacy_count=0
+  [ -f "$WORKSPACE/MEMORY.md" ] && legacy_count=$((legacy_count + 1))
+  legacy_count=$((legacy_count + $(ls "$MEMORY_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ')))
+  legacy_count=$((legacy_count + $(ls "$MEMORY_DIR"/weekly/*.md 2>/dev/null | wc -l | tr -d ' ')))
+  legacy_count=$((legacy_count + $(ls "$MEMORY_DIR"/topics/*.md 2>/dev/null | wc -l | tr -d ' ')))
+
+  archival_count=$(wc -l < "$MEMORY_DIR/archival.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+
+  if [ "$legacy_count" -gt 0 ] && [ "$archival_count" -lt 10 ]; then
+    echo ""
+    echo "📦 Found $legacy_count legacy memory files (MEMORY.md, daily logs, weekly summaries, topics)."
+    if $NON_INTERACTIVE; then
+      echo "   Migrating automatically..."
+      node "$PLUGIN_DIR/extras/migrate-legacy.mjs" "$WORKSPACE" 2>&1 | tail -3
+    else
+      printf "   Migrate into archival memory? [Y/n]: "
+      read -r migrate_answer
+      if [ "${migrate_answer:-Y}" != "n" ] && [ "${migrate_answer:-Y}" != "N" ]; then
+        node "$PLUGIN_DIR/extras/migrate-legacy.mjs" "$WORKSPACE" 2>&1 | tail -5
+      else
+        echo "⏭️  Skipping migration. Run manually later: node $PLUGIN_DIR/extras/migrate-legacy.mjs $WORKSPACE"
+      fi
+    fi
+    echo ""
+  else
+    if [ "$archival_count" -gt 10 ]; then
+      echo "⏭️  Archival already has $archival_count records, skipping migration"
+    fi
+  fi
+fi
+
 # --- 4. Install memory-maintenance.sh ---
 SCRIPTS_DIR="$WORKSPACE/scripts"
 mkdir -p "$SCRIPTS_DIR"
