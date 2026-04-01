@@ -24,6 +24,14 @@
       "message": "Run archival_deduplicate with apply=true to clean up duplicate facts. Then run archival_stats. Do NOT output anything to the main chat.",
       "model": "anthropic/claude-sonnet-4-6",
       "description": "Weekly dedup: clean up near-duplicate archival records"
+    },
+    {
+      "id": "memory-dashboard-daily",
+      "schedule": "30 9 * * *",
+      "agent": "main",
+      "message": "Run memory_dashboard to regenerate the HTML dashboard. Do NOT output anything to the main chat.",
+      "model": "anthropic/claude-sonnet-4-6",
+      "description": "Daily dashboard refresh at 9:30am"
     }
   ]
 }
