@@ -321,7 +321,7 @@ else
   echo "⚠️  AGENTS.md not found — create it with memory instructions"
 fi
 
-# --- 8. Register cron jobs ---
+# --- 8. Register cron jobs (for all agents with workspaces) ---
 if command -v openclaw &>/dev/null; then
   EXISTING_CRONS=$(openclaw cron list --json 2>/dev/null | python3 -c "import sys,json; data=json.load(sys.stdin); print(' '.join(j.get('name','') for j in (data if isinstance(data,list) else data.get('jobs',[]))))" 2>/dev/null || echo "")
 
@@ -339,7 +339,7 @@ except:
 " 2>/dev/null || echo "UTC")
 
   register_cron() {
-    local name="$1" cron="$2" msg="$3" desc="$4" timeout="${5:-60000}"
+    local name="$1" cron="$2" agent="$3" msg="$4" desc="$5" timeout="${6:-60000}"
     if echo "$EXISTING_CRONS" | grep -q "$name"; then
       echo "⏭️  Cron '$name' already exists"
       return
@@ -348,30 +348,82 @@ except:
       --name "$name" \
       --cron "$cron" \
       --tz "$TZ_IANA" \
-      --agent main \
+      --agent "$agent" \
       --session isolated \
       --model "anthropic/claude-sonnet-4-6" \
       --message "$msg" \
       --description "$desc" \
       --timeout "$timeout" \
-      >/dev/null 2>&1 && echo "✅ Cron '$name' registered" || echo "⚠️  Cron '$name' failed (gateway not running?)"
+      >/dev/null 2>&1 && echo "✅ Cron '$name' ($agent) registered" || echo "⚠️  Cron '$name' failed (gateway not running?)"
   }
 
-  register_cron "memory-reflect-daily" "0 9 * * *" \
+  # Discover all agents from openclaw.json
+  AGENTS=$(python3 -c "
+import json, os
+try:
+    with open(os.path.expanduser('$CONFIG')) as f:
+        cfg = json.load(f)
+    agents = [a['id'] for a in cfg.get('agents',{}).get('list',[])]
+    print(' '.join(agents) if agents else 'main')
+except:
+    print('main')
+" 2>/dev/null || echo "main")
+
+  echo "  Agents found: $AGENTS"
+
+  # Register main agent crons (shared across all agents using default workspace)
+  register_cron "memory-reflect-daily" "0 9 * * *" "main" \
     "Run memory_reflect with window_days=7. If you notice patterns, store via archival_insert with tags=['reflection']. Do NOT output to main chat." \
     "Daily reflection: analyze memory patterns"
 
-  register_cron "memory-consolidate-6h" "0 */6 * * *" \
+  register_cron "memory-consolidate-6h" "0 */6 * * *" "main" \
     "Read today's daily log. If it has content not in archival, run memory_consolidate. Then archival_stats. Do NOT output to main chat." \
     "Auto-consolidate daily logs every 6 hours"
 
-  register_cron "memory-dedup-weekly" "0 4 * * 0" \
+  register_cron "memory-dedup-weekly" "0 4 * * 0" "main" \
     "Run archival_deduplicate with apply=true. Then archival_stats. Do NOT output to main chat." \
     "Weekly dedup: clean near-duplicate records"
 
-  register_cron "memory-dashboard-daily" "30 9 * * *" \
+  register_cron "memory-dashboard-daily" "30 9 * * *" "main" \
     "Run memory_dashboard to regenerate the HTML dashboard. Do NOT output to main chat." \
-    "Daily dashboard refresh" 30000
+    "Daily dashboard refresh for main agent" 30000
+
+  # Register per-agent crons for agents with separate workspaces
+  STAGGER=0
+  for agent_id in $AGENTS; do
+    # Skip main (already registered above)
+    [ "$agent_id" = "main" ] && continue
+
+    # Check if this agent has its own workspace
+    HAS_OWN_WS=$(python3 -c "
+import json, os
+try:
+    with open(os.path.expanduser('$CONFIG')) as f:
+        cfg = json.load(f)
+    default_ws = cfg.get('agents',{}).get('defaults',{}).get('workspace','')
+    for a in cfg.get('agents',{}).get('list',[]):
+        if a['id'] == '$agent_id' and a.get('workspace','') and a.get('workspace','') != default_ws:
+            print('yes')
+            break
+    else:
+        print('no')
+except:
+    print('no')
+" 2>/dev/null || echo "no")
+
+    if [ "$HAS_OWN_WS" = "yes" ]; then
+      STAGGER=$((STAGGER + 5))
+      register_cron "${agent_id}-memory-dashboard" "$((30 + STAGGER)) 9 * * *" "$agent_id" \
+        "Run memory_dashboard to regenerate the HTML dashboard. Do NOT output to main chat." \
+        "Daily dashboard refresh for $agent_id agent" 30000
+
+      register_cron "${agent_id}-memory-consolidate" "30 */6 * * *" "$agent_id" \
+        "Read today's daily log. If it has content not in archival, run memory_consolidate. Then archival_stats. Do NOT output to main chat." \
+        "Auto-consolidate daily logs for $agent_id" 60000
+
+      echo "  ✅ Per-agent crons registered for: $agent_id"
+    fi
+  done
 else
   echo "⚠️  openclaw CLI not found — skipping cron registration"
 fi
