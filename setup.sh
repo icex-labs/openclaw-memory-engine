@@ -1,13 +1,9 @@
 #!/bin/bash
 # setup.sh — One-command setup for openclaw-memory-engine
 # Usage: bash setup.sh [workspace_path]
+#   --non-interactive    Skip prompts, use defaults
 #
-# What it does:
-#   1. Enables the plugin in openclaw.json
-#   2. Creates memory/core.json template (if not exists)
-#   3. Installs memory-maintenance.sh + LaunchAgent (macOS)
-#   4. Patches AGENTS.md with memory tool instructions (if not already patched)
-#   5. Validates config
+# Supports: macOS (LaunchAgent), Linux (systemd timer), Windows (manual)
 
 set -euo pipefail
 
@@ -17,52 +13,88 @@ CONFIG="$OPENCLAW_DIR/openclaw.json"
 MEMORY_DIR="$WORKSPACE/memory"
 AGENTS_MD="$WORKSPACE/AGENTS.md"
 PLUGIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+NON_INTERACTIVE=false
+[[ "${2:-}" == "--non-interactive" || "${1:-}" == "--non-interactive" ]] && NON_INTERACTIVE=true
+OS="$(uname -s)"
 
 echo "🧠 openclaw-memory-engine setup"
 echo "   Workspace: $WORKSPACE"
 echo "   Config:    $CONFIG"
+echo "   Platform:  $OS"
 echo ""
+
+# --- Helper: prompt with default ---
+ask() {
+  local prompt="$1" default="$2" var_name="$3"
+  if $NON_INTERACTIVE; then
+    eval "$var_name=\"$default\""
+    return
+  fi
+  printf "%s [%s]: " "$prompt" "$default"
+  read -r input
+  eval "$var_name=\"${input:-$default}\""
+}
 
 # --- 1. Create memory directory ---
 mkdir -p "$MEMORY_DIR"
 echo "✅ memory/ directory ready"
 
-# --- 2. Create core.json template (if not exists) ---
+# --- 2. Create core.json (interactive or template) ---
 if [ ! -f "$MEMORY_DIR/core.json" ]; then
-  cat > "$MEMORY_DIR/core.json" <<'CORE'
+  echo ""
+  echo "📝 Let's set up your core memory (what your agent knows about you)."
+  echo "   Press Enter to skip any field — you can update later via core_memory_replace."
+  echo ""
+
+  ask "Your name" "" USER_NAME
+  ask "Your location (city, timezone)" "" USER_LOCATION
+  ask "Language preference (e.g., 'English', '中英对照')" "English" USER_LANG
+  ask "Your job/role" "" USER_JOB
+  ask "Agent relationship (e.g., 'helpful assistant', 'intimate companion')" "helpful assistant" REL_DYNAMIC
+
+  python3 -c "
+import json, datetime
+core = {
+    '_meta': {
+        'version': 1,
+        'updated_at': datetime.datetime.utcnow().isoformat() + 'Z',
+        'description': 'Core memory block — always in context. Keep under 500 tokens.'
+    },
+    'user': {
+        'name': '''$USER_NAME''',
+        'location': '''$USER_LOCATION''',
+        'language': '''$USER_LANG''',
+        'job': '''$USER_JOB'''
+    },
+    'relationship': {
+        'dynamic': '''$REL_DYNAMIC''',
+        'trust': '',
+        'boundaries': ''
+    },
+    'preferences': {},
+    'current_focus': []
+}
+# Remove empty string values
+for section in ['user', 'relationship']:
+    core[section] = {k: v for k, v in core[section].items() if v}
+with open('$MEMORY_DIR/core.json', 'w') as f:
+    json.dump(core, f, indent=2, ensure_ascii=False)
+print('✅ core.json created with your info')
+" 2>/dev/null || {
+    # Fallback if python3 fails
+    cat > "$MEMORY_DIR/core.json" <<'CORE'
 {
-  "_meta": {
-    "version": 1,
-    "updated_at": "PLACEHOLDER",
-    "description": "Core memory block — always in context. Keep under 500 tokens."
-  },
-  "user": {
-    "name": "",
-    "location": "",
-    "language": "",
-    "job": ""
-  },
-  "relationship": {
-    "dynamic": "",
-    "trust": "",
-    "boundaries": ""
-  },
+  "_meta": { "version": 1, "updated_at": "", "description": "Core memory block." },
+  "user": {},
+  "relationship": { "dynamic": "helpful assistant" },
   "preferences": {},
   "current_focus": []
 }
 CORE
-  # Replace placeholder with current time
-  if command -v python3 &>/dev/null; then
-    python3 -c "
-import json, datetime
-with open('$MEMORY_DIR/core.json') as f: d = json.load(f)
-d['_meta']['updated_at'] = datetime.datetime.utcnow().isoformat() + 'Z'
-with open('$MEMORY_DIR/core.json', 'w') as f: json.dump(d, f, indent=2)
-"
-  fi
-  echo "✅ core.json template created — edit it with your info!"
+    echo "✅ core.json created (edit manually to add your info)"
+  }
 else
-  echo "⏭️  core.json already exists, skipping"
+  echo "⏭️  core.json already exists"
 fi
 
 # --- 3. Create empty archival.jsonl (if not exists) ---
@@ -79,7 +111,7 @@ SCRIPTS_DIR="$WORKSPACE/scripts"
 mkdir -p "$SCRIPTS_DIR"
 if [ ! -f "$SCRIPTS_DIR/memory-maintenance.sh" ]; then
   cp "$PLUGIN_DIR/extras/memory-maintenance.sh" "$SCRIPTS_DIR/memory-maintenance.sh" 2>/dev/null || {
-    echo "⚠️  memory-maintenance.sh not found in extras/. Copy it manually from the repo."
+    echo "⚠️  memory-maintenance.sh not found in extras/. Copy manually."
   }
   chmod +x "$SCRIPTS_DIR/memory-maintenance.sh" 2>/dev/null
   echo "✅ memory-maintenance.sh installed"
@@ -87,11 +119,14 @@ else
   echo "⏭️  memory-maintenance.sh already exists"
 fi
 
-# --- 5. Install LaunchAgent (macOS only) ---
-if [ "$(uname)" = "Darwin" ]; then
-  PLIST="$HOME/Library/LaunchAgents/ai.openclaw.memory-maintenance.plist"
-  if [ ! -f "$PLIST" ]; then
-    cat > "$PLIST" <<PLIST
+# --- 5. Install platform-specific scheduler ---
+install_scheduler() {
+  case "$OS" in
+    Darwin)
+      # macOS: LaunchAgent
+      PLIST="$HOME/Library/LaunchAgents/ai.openclaw.memory-maintenance.plist"
+      if [ ! -f "$PLIST" ]; then
+        cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -119,14 +154,56 @@ if [ "$(uname)" = "Darwin" ]; then
 </dict>
 </plist>
 PLIST
-    launchctl bootstrap gui/$(id -u) "$PLIST" 2>/dev/null || true
-    echo "✅ LaunchAgent installed (daily 3am maintenance)"
-  else
-    echo "⏭️  LaunchAgent already exists"
-  fi
-fi
+        launchctl bootstrap gui/$(id -u) "$PLIST" 2>/dev/null || true
+        echo "✅ macOS LaunchAgent installed (daily 3am)"
+      else
+        echo "⏭️  macOS LaunchAgent already exists"
+      fi
+      ;;
 
-# --- 6. Patch openclaw.json (add plugin config if missing) ---
+    Linux)
+      # Linux: systemd user timer
+      UNIT_DIR="$HOME/.config/systemd/user"
+      mkdir -p "$UNIT_DIR"
+      if [ ! -f "$UNIT_DIR/openclaw-memory-maintenance.timer" ]; then
+        cat > "$UNIT_DIR/openclaw-memory-maintenance.service" <<SVC
+[Unit]
+Description=OpenClaw Memory Maintenance
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $SCRIPTS_DIR/memory-maintenance.sh
+SVC
+        cat > "$UNIT_DIR/openclaw-memory-maintenance.timer" <<TMR
+[Unit]
+Description=OpenClaw Memory Maintenance Timer
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+TMR
+        systemctl --user daemon-reload 2>/dev/null || true
+        systemctl --user enable --now openclaw-memory-maintenance.timer 2>/dev/null || true
+        echo "✅ Linux systemd timer installed (daily 3am)"
+      else
+        echo "⏭️  Linux systemd timer already exists"
+      fi
+      ;;
+
+    MINGW*|MSYS*|CYGWIN*)
+      echo "⚠️  Windows detected. Add a scheduled task manually:"
+      echo "    schtasks /create /tn \"OpenClaw Memory Maintenance\" /tr \"bash $SCRIPTS_DIR/memory-maintenance.sh\" /sc daily /st 03:00"
+      ;;
+
+    *)
+      echo "⚠️  Unknown platform ($OS). Set up a daily cron manually:"
+      echo "    0 3 * * * /bin/bash $SCRIPTS_DIR/memory-maintenance.sh"
+      ;;
+  esac
+}
+install_scheduler
+
+# --- 6. Patch openclaw.json ---
 if command -v python3 &>/dev/null && [ -f "$CONFIG" ]; then
   python3 <<PYEOF
 import json
@@ -136,13 +213,11 @@ with open("$CONFIG") as f:
 
 changed = False
 
-# Ensure plugins.allow includes memory-engine
 allow = cfg.setdefault("plugins", {}).setdefault("allow", [])
 if "memory-engine" not in allow:
     allow.append("memory-engine")
     changed = True
 
-# Ensure plugins.entries.memory-engine exists
 entries = cfg["plugins"].setdefault("entries", {})
 if "memory-engine" not in entries:
     entries["memory-engine"] = {
@@ -154,51 +229,80 @@ if "memory-engine" not in entries:
 if changed:
     with open("$CONFIG", "w") as f:
         json.dump(cfg, f, indent=2)
-    print("✅ openclaw.json updated with memory-engine plugin config")
+    print("✅ openclaw.json updated")
 else:
-    print("⏭️  openclaw.json already has memory-engine config")
+    print("⏭️  openclaw.json already configured")
 PYEOF
 else
-  echo "⚠️  Could not patch openclaw.json automatically. Add manually:"
+  echo "⚠️  Could not patch openclaw.json. Add manually:"
   echo '  "plugins": { "allow": ["memory-engine"], "entries": { "memory-engine": { "enabled": true } } }'
 fi
 
-# --- 7. Patch AGENTS.md (add memory instructions if missing) ---
+# --- 7. Patch AGENTS.md ---
 if [ -f "$AGENTS_MD" ]; then
   if ! grep -q "core_memory_read" "$AGENTS_MD"; then
     cat >> "$AGENTS_MD" <<'PATCH'
 
 ## Memory System — MemGPT Architecture
 
-You have 4 memory tools. **Use them actively.**
+You have 19 memory tools. **Use them actively.**
 
-### Core Memory (`core_memory_read` / `core_memory_replace`)
+### Core Memory (`core_memory_read` / `core_memory_replace` / `core_memory_append`)
 - Call `core_memory_read` at **every session start**
-- Update with `core_memory_replace` when facts change
-- `current_focus` should be updated frequently (max 5 items)
+- `core_memory_replace` when facts change
+- `current_focus` max 5 items — update frequently
 - Hard limit: 3KB — move details to archival
 
-### Archival Memory (`archival_insert` / `archival_search`)
-- `archival_insert`: store facts, decisions, events, summaries
-- `archival_search`: keyword search before answering factual questions
-- Always set `entity` and `tags` for better retrieval
+### Archival Memory (`archival_insert` / `archival_search` / `archival_update` / `archival_delete`)
+- `archival_insert`: store facts with entity + tags + importance (1-10)
+- `archival_search`: hybrid keyword + semantic search. Use before guessing.
+- `archival_update`/`archival_delete`: correct or remove outdated facts
+
+### Knowledge Graph (`graph_query` / `graph_add`)
+- Auto-extracted from archival_insert (relations like has_doctor, owns, lives_in)
+- `graph_query`: traverse from entity to find connections
+- `graph_add`: manually add relations
+
+### Episodic Memory (`episode_save` / `episode_recall`)
+- `episode_save`: at end of meaningful conversations (summary, decisions, mood, topics)
+- `episode_recall`: "what did we discuss about X last time?"
+
+### Maintenance
+- `memory_reflect`: analyze patterns (use during heartbeats)
+- `archival_deduplicate`: clean near-duplicate facts
+- `memory_consolidate`: extract facts from text blocks
+- `memory_dashboard`: generate browsable HTML dashboard
 
 ### Memory Discipline
 - If it matters → `archival_insert` it. "Mental notes" don't survive restarts.
 - Don't guess → `archival_search` first.
-- Update core memory proactively when projects complete or facts change.
+- End of conversation → `episode_save`.
+- Update core memory proactively.
 PATCH
-    echo "✅ AGENTS.md patched with memory tool instructions"
+    echo "✅ AGENTS.md patched with memory instructions"
   else
-    echo "⏭️  AGENTS.md already has memory tool instructions"
+    echo "⏭️  AGENTS.md already has memory instructions"
   fi
 else
-  echo "⚠️  AGENTS.md not found at $AGENTS_MD — create it with memory instructions"
+  echo "⚠️  AGENTS.md not found — create it with memory instructions"
 fi
 
 # --- 8. Register cron jobs ---
 if command -v openclaw &>/dev/null; then
   EXISTING_CRONS=$(openclaw cron list --json 2>/dev/null | python3 -c "import sys,json; data=json.load(sys.stdin); print(' '.join(j.get('name','') for j in (data if isinstance(data,list) else data.get('jobs',[]))))" 2>/dev/null || echo "")
+
+  # Detect timezone
+  TZ_IANA=$(python3 -c "
+try:
+    import subprocess
+    if '$(uname)' == 'Darwin':
+        tz = subprocess.check_output(['readlink', '/etc/localtime']).decode().strip().split('zoneinfo/')[-1]
+    else:
+        tz = open('/etc/timezone').read().strip()
+    print(tz)
+except:
+    print('UTC')
+" 2>/dev/null || echo "UTC")
 
   register_cron() {
     local name="$1" cron="$2" msg="$3" desc="$4" timeout="${5:-60000}"
@@ -209,14 +313,14 @@ if command -v openclaw &>/dev/null; then
     openclaw cron add \
       --name "$name" \
       --cron "$cron" \
-      --tz "$(python3 -c 'import time; import datetime; print(datetime.datetime.now().astimezone().tzname())' 2>/dev/null || echo 'UTC')" \
+      --tz "$TZ_IANA" \
       --agent main \
       --session isolated \
       --model "anthropic/claude-sonnet-4-6" \
       --message "$msg" \
       --description "$desc" \
       --timeout "$timeout" \
-      >/dev/null 2>&1 && echo "✅ Cron '$name' registered" || echo "⚠️  Cron '$name' failed to register (gateway may not be running)"
+      >/dev/null 2>&1 && echo "✅ Cron '$name' registered" || echo "⚠️  Cron '$name' failed (gateway not running?)"
   }
 
   register_cron "memory-reflect-daily" "0 9 * * *" \
@@ -235,36 +339,30 @@ if command -v openclaw &>/dev/null; then
     "Run memory_dashboard to regenerate the HTML dashboard. Do NOT output to main chat." \
     "Daily dashboard refresh" 30000
 else
-  echo "⚠️  openclaw CLI not found — skipping cron registration. Register manually after install."
+  echo "⚠️  openclaw CLI not found — skipping cron registration"
 fi
 
 # --- 9. Validate config ---
 echo ""
 if command -v openclaw &>/dev/null; then
-  openclaw config validate 2>&1 && echo "✅ Config valid" || echo "❌ Config validation failed — check openclaw.json"
+  openclaw config validate 2>&1 && echo "✅ Config valid" || echo "❌ Config validation failed"
 fi
 
 echo ""
 echo "🎉 Setup complete!"
 echo ""
 echo "Next steps:"
-echo "  1. Edit $MEMORY_DIR/core.json with your info"
+echo "  1. Review $MEMORY_DIR/core.json (edit if needed)"
 echo "  2. Restart gateway: openclaw gateway restart"
 echo "  3. Test: openclaw agent -m 'core_memory_read'"
-echo "  4. Open dashboard: open $MEMORY_DIR/dashboard.html"
+echo "  4. Dashboard: open $MEMORY_DIR/dashboard.html"
 echo ""
-echo "Your agent now has 19 memory tools:"
-echo "  Core:        core_memory_read, core_memory_replace, core_memory_append"
-echo "  Archival:    archival_insert, archival_search, archival_update, archival_delete, archival_stats"
-echo "  Graph:       graph_query, graph_add"
-echo "  Episodes:    episode_save, episode_recall"
-echo "  Reflection:  memory_reflect"
-echo "  Maintenance: archival_deduplicate, memory_consolidate"
-echo "  Backup:      memory_export, memory_import"
-echo "  Admin:       memory_migrate, memory_dashboard"
-echo ""
-echo "Cron jobs registered:"
-echo "  Daily 9:00am — memory reflection"
-echo "  Every 6h     — auto-consolidate daily logs"
-echo "  Weekly Sun    — deduplicate archival"
-echo "  Daily 9:30am — dashboard refresh"
+echo "19 tools ready:"
+echo "  Core:     core_memory_read, core_memory_replace, core_memory_append"
+echo "  Archival: archival_insert/search/update/delete/stats"
+echo "  Graph:    graph_query, graph_add"
+echo "  Episodes: episode_save, episode_recall"
+echo "  Reflect:  memory_reflect"
+echo "  Maint:    archival_deduplicate, memory_consolidate"
+echo "  Backup:   memory_export, memory_import"
+echo "  Admin:    memory_migrate, memory_dashboard"
