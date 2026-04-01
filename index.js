@@ -16,6 +16,7 @@
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 import { resolveWorkspace, getCoreSizeLimit, DEFAULT_TOP_K, MAX_TOP_K } from "./lib/paths.js";
 import { readCore, writeCore, dotGet, dotSet, autoParse } from "./lib/core.js";
@@ -95,25 +96,39 @@ export default definePluginEntry({
     // Factory ctx has: { sessionKey, workspaceDir, agentId, ... }
     // ═══════════════════════════════════════════════════════════════════
 
-    // Background: auto-backfill missing embeddings on startup
-    const defaultWs = resolveWorkspace(null);
-    setTimeout(() => {
+    // Background: auto-backfill missing embeddings on startup (all workspaces)
+    setTimeout(async () => {
       try {
-        const records = loadArchival(defaultWs);
-        const cache = loadEmbeddingCache(defaultWs);
-        const missing = records.filter((r) => r.id && !cache[r.id]).length;
-        if (missing > 0) {
-          console.error(`[memory-engine] Backfilling ${missing} missing embeddings...`);
-          backfillEmbeddings(defaultWs, records, {
-            onProgress: (done, total) => {
-              if (done % 500 === 0) console.error(`[memory-engine] Embedding backfill: ${done}/${total}`);
-            },
-          }).then((result) => {
-            console.error(`[memory-engine] Backfill complete: ${result.processed} embedded, ${result.errors} errors`);
-          }).catch(() => {});
+        // Discover all unique workspaces from openclaw.json agent configs
+        const workspaces = new Set();
+        workspaces.add(resolveWorkspace(null)); // default
+        try {
+          const cfgPath = join(process.env.HOME || "/tmp", ".openclaw", "openclaw.json");
+          const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+          for (const agent of cfg?.agents?.list || []) {
+            if (agent.workspace) workspaces.add(agent.workspace);
+          }
+        } catch { /* ignore */ }
+
+        for (const wsDir of workspaces) {
+          try {
+            const records = loadArchival(wsDir);
+            if (records.length === 0) continue;
+            const cache = loadEmbeddingCache(wsDir);
+            const missing = records.filter((r) => r.id && !cache[r.id]).length;
+            if (missing > 0) {
+              console.error(`[memory-engine] Backfilling ${missing} embeddings in ${wsDir}...`);
+              const result = await backfillEmbeddings(wsDir, records, {
+                onProgress: (done, total) => {
+                  if (done % 500 === 0) console.error(`[memory-engine] ${wsDir}: ${done}/${total}`);
+                },
+              });
+              console.error(`[memory-engine] ${wsDir}: done — ${result.processed} embedded, ${result.errors} errors`);
+            }
+          } catch { /* skip workspace errors */ }
         }
       } catch { /* ignore startup errors */ }
-    }, 10000); // delay 10s after gateway start to avoid blocking
+    }, 10000); // delay 10s after gateway start
 
     // ─── core_memory_read ───
     api.registerTool(withAgent((agentId) => ({
