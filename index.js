@@ -3,7 +3,7 @@
  *
  * MemGPT-style hierarchical memory plugin for OpenClaw.
  *
- * Tools (19):
+ * Tools (20):
  *   Core:        core_memory_read, core_memory_replace, core_memory_append
  *   Archival:    archival_insert, archival_search, archival_update, archival_delete, archival_stats
  *   Graph:       graph_query, graph_add
@@ -11,7 +11,7 @@
  *   Reflection:  memory_reflect
  *   Maintenance: archival_deduplicate, memory_consolidate
  *   Backup:      memory_export, memory_import
- *   Admin:       memory_migrate, memory_dashboard
+ *   Admin:       memory_migrate, memory_dashboard, memory_quality
  */
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
@@ -29,6 +29,7 @@ import { exportMemory, importMemory } from "./lib/backup.js";
 import { queryGraph, addTriple, extractTriples } from "./lib/graph.js";
 import { saveEpisode, recallEpisodes, indexEpisodeEmbedding } from "./lib/episodes.js";
 import { analyzePatterns, formatReflection } from "./lib/reflection.js";
+import { runQualityPass, formatQualityReport } from "./lib/quality.js";
 import { migrateFromJsonl } from "./lib/store-sqlite.js";
 import { generateDashboard } from "./lib/dashboard.js";
 
@@ -654,6 +655,33 @@ export default definePluginEntry({
           return text(`OK: Dashboard generated at ${outPath}\nOpen in browser: file://${outPath}`);
         } catch (e) {
           return text(`ERROR: Dashboard generation failed: ${e.message}`);
+        }
+      },
+    })));
+
+    // ─── memory_quality ───
+    api.registerTool(withAgent((agentId) => ({
+      name: "memory_quality",
+      description:
+        "Run a data quality pass: re-classify 'general' entities with richer patterns, re-rate flat importance scores using domain rules, extract missing knowledge graph triples, and generate episodes from daily record clusters. Run after migration or periodically to improve memory quality.",
+      parameters: {
+        type: "object",
+        properties: {
+          skip_graph: { type: "boolean", description: "Skip graph triple extraction (default: false)" },
+          skip_episodes: { type: "boolean", description: "Skip episode generation (default: false)" },
+        },
+        additionalProperties: false,
+      },
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
+        try {
+          const result = runQualityPass(wsp, {
+            skipGraph: params.skip_graph || false,
+            skipEpisodes: params.skip_episodes || false,
+          });
+          return text(formatQualityReport(result));
+        } catch (e) {
+          return text(`ERROR: Quality pass failed: ${e.message}`);
         }
       },
     })));

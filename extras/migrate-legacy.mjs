@@ -163,3 +163,19 @@ for (const { path, tag } of files) {
 
 console.log(`\n✅ Migration complete: ${inserted} facts imported, ${skipped} skipped (duplicates)`);
 console.log(`Total archival: ${existingContent.size} records`);
+
+// --- Post-migration quality pass ---
+if (inserted > 0) {
+  console.log(`\n📊 Running post-migration quality pass...`);
+  try {
+    // Dynamic import of quality module (relative to plugin install dir)
+    // Since this script is in extras/, quality.js is at ../lib/quality.js
+    const qualityPath = join(import.meta.dirname, "..", "lib", "quality.js");
+    const { runQualityPass, formatQualityReport } = await import(qualityPath);
+    const result = runQualityPass(WS);
+    console.log(formatQualityReport(result));
+  } catch (e) {
+    console.log(`⚠️  Quality pass skipped: ${e.message}`);
+    console.log(`   Run manually: openclaw agent -m 'memory_quality'`);
+  }
+}
