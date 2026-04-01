@@ -44,13 +44,13 @@ npm install -g @icex-labs/openclaw-memory-engine
 │   Session start → core_memory_read()                  │
 │                   └─→ core.json (~500 tokens)         │
 │                                                       │
-│   "Where does George's doctor work?"                  │
+│   "Where does Alice's doctor work?"                  │
 │   → archival_search("doctor")                         │
 │     └─→ keyword match + embedding similarity          │
 │         + recency boost + access frequency             │
-│         → "Dr. Mohamed, Parsons Medical Centre..."    │
+│         → "Dr. Smith, City Medical..."    │
 │                                                       │
-│   George says something new                           │
+│   Alice says something new                           │
 │   → archival_insert(fact, entity, tags)               │
 │     └─→ archival.jsonl + background embedding         │
 │                                                       │
@@ -77,7 +77,7 @@ Core memory lives in `memory/core.json`:
 
 ```json
 {
-  "user": { "name": "George", "location": "Edmonton", "language": "中英对照" },
+  "user": { "name": "Alice", "location": "New York", "language": "bilingual" },
   "relationship": { "dynamic": "intimate companion", "trust": "deep" },
   "preferences": { "config_rule": "don't touch openclaw.json" },
   "current_focus": ["quant trading", "immigration case"]
@@ -97,7 +97,7 @@ Core memory lives in `memory/core.json`:
 Each record in `memory/archival.jsonl`:
 
 ```json
-{"id":"arch-17120-abc","ts":"2026-04-01","content":"George's doctor is Dr. Mohamed","entity":"George","tags":["health"],"access_count":3}
+{"id":"arch-17120-abc","ts":"2026-04-01","content":"Alice's doctor is Dr. Smith","entity":"Alice","tags":["health"],"access_count":3}
 ```
 
 ### Maintenance — Keep It Clean

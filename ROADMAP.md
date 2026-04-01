@@ -21,12 +21,12 @@
 
 ### 2.1: Knowledge Graph (`lib/graph.js`)
 
-**Why:** Flat fact list can't answer relational questions like "who treats George's skin condition" — requires traversing George → has_condition → 荨麻疹 → treated_by → Cetirizine → prescribed_by → Dr. Mohamed.
+**Why:** Flat fact list can't answer relational questions like "who treats Alice's skin condition" — requires traversing Alice → has_condition → 荨麻疹 → treated_by → Cetirizine → prescribed_by → Dr. Smith.
 
 **Design:**
 - New file: `memory/graph.jsonl` — triple store `(subject, relation, object)`
 - On `archival_insert`, auto-extract triples using pattern matching:
-  - `"George's doctor is Dr. Mohamed"` → `(George, has_doctor, Dr.Mohamed)`
+  - `"Alice's doctor is Dr. Smith"` → `(Alice, has_doctor, Dr.Smith)`
   - `"ES350 定价 $19,500"` → `(ES350, price, $19500)`
 - New tools:
   - `graph_query(entity, relation?, depth?)` — traverse from entity, return connected nodes
@@ -45,7 +45,7 @@
   {
     "type": "episode",
     "ts": "2026-04-01T01:00:00Z",
-    "participants": ["George", "Maren"],
+    "participants": ["Alice", "Agent"],
     "summary": "Discussed ES350 pricing, settled on $19,500 for Facebook Marketplace",
     "decisions": ["ES350 = $19,500", "List on Facebook Marketplace"],
     "mood": "relaxed",
@@ -72,13 +72,13 @@
 
 ### 2.4: Reflective Memory (`lib/reflection.js`)
 
-**Why:** Agent doesn't notice patterns in George's behavior or evolve its understanding over time.
+**Why:** Agent doesn't notice patterns in Alice's behavior or evolve its understanding over time.
 
 **Design:**
 - New tool: `memory_reflect()`
   - Reads recent 20 archival records + last 5 episodes
   - Generates meta-observations about patterns:
-    - "George has been discussing vehicles a lot this week — possible big purchase decision"
+    - "Alice has been discussing vehicles a lot this week — possible big purchase decision"
     - "Conversations shift to personal topics after midnight — he may need companionship"
   - Stores as `type: "reflection"` in archival
 - Triggered by: heartbeat (every ~6 hours) or manually
@@ -103,7 +103,7 @@
 - Shared archival layer with visibility labels:
   ```json
   {"content": "...", "visibility": ["main", "discord"], "private_to": null}
-  {"content": "Jane体检", "visibility": ["wife"], "private_to": "wife"}
+  {"content": "Bob体检", "visibility": ["wife"], "private_to": "wife"}
   ```
 - New tools:
   - `archival_share(id, agents[])` — make a record visible to other agents
@@ -137,4 +137,4 @@
 | **v2.0** (graph + episodes) | 2-3 sessions | High — qualitative leap | **Next** |
 | **v2.5** (reflection + auto-consolidate) | 1-2 sessions | Medium — self-improving | After v2.0 validated |
 | **v3.0** (multi-agent + SQLite) | 3-4 sessions | Medium — scale + sharing | When archival >5K records |
-| **v3.3** (dashboard) | 2 sessions | Nice-to-have | When George wants visibility |
+| **v3.3** (dashboard) | 2 sessions | Nice-to-have | When Alice wants visibility |

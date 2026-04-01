@@ -424,7 +424,7 @@ export default definePluginEntry({
         properties: {
           subject: { type: "string", description: "Subject entity (e.g., 'George')" },
           relation: { type: "string", description: "Relation type (e.g., 'has_doctor', 'owns', 'lives_in')" },
-          object: { type: "string", description: "Object entity (e.g., 'Dr. Mohamed', 'Edmonton')" },
+          object: { type: "string", description: "Object entity (e.g., 'Dr. Smith', 'New York')" },
         },
         required: ["subject", "relation", "object"],
         additionalProperties: false,

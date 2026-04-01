@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-WORKSPACE="/Users/george/.openclaw/workspace"
+WORKSPACE="${OPENCLAW_WORKSPACE:-$HOME/.openclaw/workspace}"
 MEMORY_DIR="$WORKSPACE/memory"
 TOPICS_DIR="$MEMORY_DIR/topics"
 WEEKLY_DIR="$MEMORY_DIR/weekly"
