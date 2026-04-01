@@ -3,11 +3,12 @@
  *
  * MemGPT-style hierarchical memory plugin for OpenClaw.
  *
- * Tools (16):
+ * Tools (17):
  *   Core:        core_memory_read, core_memory_replace, core_memory_append
  *   Archival:    archival_insert, archival_search, archival_update, archival_delete, archival_stats
  *   Graph:       graph_query, graph_add
  *   Episodes:    episode_save, episode_recall
+ *   Reflection:  memory_reflect
  *   Maintenance: archival_deduplicate, memory_consolidate
  *   Backup:      memory_export, memory_import
  */
@@ -25,6 +26,7 @@ import { findDuplicates, applyDedup } from "./lib/dedup.js";
 import { exportMemory, importMemory } from "./lib/backup.js";
 import { queryGraph, addTriple, extractTriples } from "./lib/graph.js";
 import { saveEpisode, recallEpisodes, indexEpisodeEmbedding } from "./lib/episodes.js";
+import { analyzePatterns, formatReflection } from "./lib/reflection.js";
 
 import { readFileSync } from "node:fs";
 
@@ -457,6 +459,32 @@ export default definePluginEntry({
           return `[${i + 1}] (${ep.ts?.slice(0, 10)}) ${ep.summary}${mood}${decisions}`;
         }).join("\n\n");
         return text(`${results.length} episode(s):\n\n${fmt}`);
+      },
+    });
+
+    // ─── memory_reflect ───
+    api.registerTool({
+      name: "memory_reflect",
+      description: [
+        "Analyze recent memory for behavioral patterns, topic trends, mood shifts, and memory health.",
+        "Returns structured report with: top topics, time-of-day distribution, mood trend,",
+        "importance distribution, neglected entities, and forgetting candidates.",
+        "Use during heartbeats or when you want to understand what's been happening lately.",
+        "After reviewing the report, store meaningful observations via archival_insert with tags=['reflection'].",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          window_days: { type: "number", description: "Analysis window in days (default: 7, max: 30)" },
+        },
+        additionalProperties: false,
+      },
+      async execute(_id, params, ctx) {
+        const ws = resolveWorkspace(ctx);
+        const window = Math.min(params.window_days || 7, 30);
+        const analysis = analyzePatterns(ws, window);
+        const report = formatReflection(analysis);
+        return text(report);
       },
     });
 

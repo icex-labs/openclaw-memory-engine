@@ -1,0 +1,29 @@
+{
+  "_comment": "OpenClaw cron jobs for memory auto-consolidation. Install via: openclaw cron create --from-file <this-file>",
+  "crons": [
+    {
+      "id": "memory-reflect-daily",
+      "schedule": "0 9 * * *",
+      "agent": "main",
+      "message": "Run memory_reflect with window_days=7. Review the report. If you notice any important patterns or observations about George's behavior/interests, store them via archival_insert with entity='reflection' tags=['reflection','pattern']. Do NOT output anything to the main chat — this is a background task.",
+      "model": "anthropic/claude-sonnet-4-6",
+      "description": "Daily reflection: analyze memory patterns and store observations"
+    },
+    {
+      "id": "memory-consolidate-6h",
+      "schedule": "0 */6 * * *",
+      "agent": "main",
+      "message": "Read today's memory/YYYY-MM-DD.md daily log file. If it has content that isn't already in archival memory, run memory_consolidate on it. Then run archival_stats to check health. Do NOT output anything to the main chat.",
+      "model": "anthropic/claude-sonnet-4-6",
+      "description": "Auto-consolidate: extract facts from daily logs every 6 hours"
+    },
+    {
+      "id": "memory-dedup-weekly",
+      "schedule": "0 4 * * 0",
+      "agent": "main",
+      "message": "Run archival_deduplicate with apply=true to clean up duplicate facts. Then run archival_stats. Do NOT output anything to the main chat.",
+      "model": "anthropic/claude-sonnet-4-6",
+      "description": "Weekly dedup: clean up near-duplicate archival records"
+    }
+  ]
+}
