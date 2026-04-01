@@ -196,7 +196,49 @@ else
   echo "⚠️  AGENTS.md not found at $AGENTS_MD — create it with memory instructions"
 fi
 
-# --- 8. Validate config ---
+# --- 8. Register cron jobs ---
+if command -v openclaw &>/dev/null; then
+  EXISTING_CRONS=$(openclaw cron list --json 2>/dev/null | python3 -c "import sys,json; data=json.load(sys.stdin); print(' '.join(j.get('name','') for j in (data if isinstance(data,list) else data.get('jobs',[]))))" 2>/dev/null || echo "")
+
+  register_cron() {
+    local name="$1" cron="$2" msg="$3" desc="$4" timeout="${5:-60000}"
+    if echo "$EXISTING_CRONS" | grep -q "$name"; then
+      echo "⏭️  Cron '$name' already exists"
+      return
+    fi
+    openclaw cron add \
+      --name "$name" \
+      --cron "$cron" \
+      --tz "$(python3 -c 'import time; import datetime; print(datetime.datetime.now().astimezone().tzname())' 2>/dev/null || echo 'UTC')" \
+      --agent main \
+      --session isolated \
+      --model "anthropic/claude-sonnet-4-6" \
+      --message "$msg" \
+      --description "$desc" \
+      --timeout "$timeout" \
+      >/dev/null 2>&1 && echo "✅ Cron '$name' registered" || echo "⚠️  Cron '$name' failed to register (gateway may not be running)"
+  }
+
+  register_cron "memory-reflect-daily" "0 9 * * *" \
+    "Run memory_reflect with window_days=7. If you notice patterns, store via archival_insert with tags=['reflection']. Do NOT output to main chat." \
+    "Daily reflection: analyze memory patterns"
+
+  register_cron "memory-consolidate-6h" "0 */6 * * *" \
+    "Read today's daily log. If it has content not in archival, run memory_consolidate. Then archival_stats. Do NOT output to main chat." \
+    "Auto-consolidate daily logs every 6 hours"
+
+  register_cron "memory-dedup-weekly" "0 4 * * 0" \
+    "Run archival_deduplicate with apply=true. Then archival_stats. Do NOT output to main chat." \
+    "Weekly dedup: clean near-duplicate records"
+
+  register_cron "memory-dashboard-daily" "30 9 * * *" \
+    "Run memory_dashboard to regenerate the HTML dashboard. Do NOT output to main chat." \
+    "Daily dashboard refresh" 30000
+else
+  echo "⚠️  openclaw CLI not found — skipping cron registration. Register manually after install."
+fi
+
+# --- 9. Validate config ---
 echo ""
 if command -v openclaw &>/dev/null; then
   openclaw config validate 2>&1 && echo "✅ Config valid" || echo "❌ Config validation failed — check openclaw.json"
@@ -208,7 +250,21 @@ echo ""
 echo "Next steps:"
 echo "  1. Edit $MEMORY_DIR/core.json with your info"
 echo "  2. Restart gateway: openclaw gateway restart"
-echo "  3. Test: openclaw agent -m 'call core_memory_read'"
+echo "  3. Test: openclaw agent -m 'core_memory_read'"
+echo "  4. Open dashboard: open $MEMORY_DIR/dashboard.html"
 echo ""
-echo "Your agent now has 4 memory tools:"
-echo "  core_memory_read, core_memory_replace, archival_insert, archival_search"
+echo "Your agent now has 19 memory tools:"
+echo "  Core:        core_memory_read, core_memory_replace, core_memory_append"
+echo "  Archival:    archival_insert, archival_search, archival_update, archival_delete, archival_stats"
+echo "  Graph:       graph_query, graph_add"
+echo "  Episodes:    episode_save, episode_recall"
+echo "  Reflection:  memory_reflect"
+echo "  Maintenance: archival_deduplicate, memory_consolidate"
+echo "  Backup:      memory_export, memory_import"
+echo "  Admin:       memory_migrate, memory_dashboard"
+echo ""
+echo "Cron jobs registered:"
+echo "  Daily 9:00am — memory reflection"
+echo "  Every 6h     — auto-consolidate daily logs"
+echo "  Weekly Sun    — deduplicate archival"
+echo "  Daily 9:30am — dashboard refresh"
