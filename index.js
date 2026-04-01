@@ -1,11 +1,13 @@
 /**
- * @icex-labs/openclaw-memory-engine v1.3.0
+ * @icex-labs/openclaw-memory-engine v2.0.0
  *
  * MemGPT-style hierarchical memory plugin for OpenClaw.
  *
- * Tools (12):
+ * Tools (16):
  *   Core:        core_memory_read, core_memory_replace, core_memory_append
  *   Archival:    archival_insert, archival_search, archival_update, archival_delete, archival_stats
+ *   Graph:       graph_query, graph_add
+ *   Episodes:    episode_save, episode_recall
  *   Maintenance: archival_deduplicate, memory_consolidate
  *   Backup:      memory_export, memory_import
  */
@@ -21,6 +23,8 @@ import { hybridSearch } from "./lib/search.js";
 import { consolidateText } from "./lib/consolidate.js";
 import { findDuplicates, applyDedup } from "./lib/dedup.js";
 import { exportMemory, importMemory } from "./lib/backup.js";
+import { queryGraph, addTriple, extractTriples } from "./lib/graph.js";
+import { saveEpisode, recallEpisodes, indexEpisodeEmbedding } from "./lib/episodes.js";
 
 import { readFileSync } from "node:fs";
 
@@ -131,26 +135,42 @@ export default definePluginEntry({
     api.registerTool({
       name: "archival_insert",
       description:
-        "Store a memory/fact in archival storage (unlimited, append-only). Tag with entity and tags for retrieval. Embedding computed in background.",
+        "Store a memory/fact in archival storage. Tags with entity and tags. Auto-extracts knowledge graph triples. Set importance (1-10, default 5) to influence search ranking and forgetting.",
       parameters: {
         type: "object",
         properties: {
           content: { type: "string", description: "The fact to store (1-3 sentences, specific)" },
           entity: { type: "string", description: "Primary entity (e.g., 'George', 'GX550')" },
           tags: { type: "array", items: { type: "string" }, description: "Category tags" },
+          importance: { type: "number", description: "1-10, how important is this fact? (default: 5). High=permanent, Low=may be forgotten." },
         },
         required: ["content"],
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
         const ws = resolveWorkspace(ctx);
+        const imp = Math.min(10, Math.max(1, params.importance ?? 5));
         const record = appendRecord(ws, {
           content: params.content,
           entity: params.entity || "",
           tags: params.tags || [],
+          importance: imp,
         });
         indexEmbedding(ws, record).catch(() => {});
-        return text(`OK: Archived ${record.id}. "${record.content.slice(0, 100)}${record.content.length > 100 ? "..." : ""}"`);
+
+        // Auto-extract knowledge graph triples
+        const triples = extractTriples(params.content);
+        const graphResults = [];
+        for (const t of triples) {
+          const added = addTriple(ws, t.s, t.r, t.o, record.id);
+          if (added) graphResults.push(`(${t.s} --${t.r}--> ${t.o})`);
+        }
+
+        let msg = `OK: Archived ${record.id} (importance=${imp}). "${record.content.slice(0, 80)}..."`;
+        if (graphResults.length > 0) {
+          msg += `\nGraph: extracted ${graphResults.length} relation(s): ${graphResults.join(", ")}`;
+        }
+        return text(msg);
       },
     });
 
@@ -323,6 +343,120 @@ export default definePluginEntry({
         if (result.inserted.length > 0) lines.push(`Inserted IDs: ${result.inserted.join(", ")}`);
         if (result.skipped.length > 0) lines.push(`Skipped: ${result.skipped.map((s) => `"${s}..."`).join(", ")}`);
         return text(lines.join("\n"));
+      },
+    });
+
+    // ─── graph_query ───
+    api.registerTool({
+      name: "graph_query",
+      description:
+        "Query the knowledge graph from a starting entity. Returns connected nodes via relations. Use to answer relational questions like 'who is George's doctor' or 'what treats his condition'.",
+      parameters: {
+        type: "object",
+        properties: {
+          entity: { type: "string", description: "Starting entity to query from (e.g., 'George', '荨麻疹')" },
+          relation: { type: "string", description: "Optional: filter by relation type (e.g., 'has_doctor', 'treated_by')" },
+          depth: { type: "number", description: "Traversal depth (default: 2, max: 4)" },
+        },
+        required: ["entity"],
+        additionalProperties: false,
+      },
+      async execute(_id, params, ctx) {
+        const ws = resolveWorkspace(ctx);
+        const depth = Math.min(params.depth || 2, 4);
+        const results = queryGraph(ws, params.entity, params.relation || null, depth);
+        if (results.length === 0) {
+          return text(`No graph connections found for entity: "${params.entity}"`);
+        }
+        const fmt = results.map((r, i) =>
+          `[${i + 1}] ${r.path.join(" ")} → ${r.node} (${r.triple.r})`,
+        ).join("\n");
+        return text(`Found ${results.length} connections from "${params.entity}":\n${fmt}`);
+      },
+    });
+
+    // ─── graph_add ───
+    api.registerTool({
+      name: "graph_add",
+      description:
+        "Manually add a relation to the knowledge graph. Use when auto-extraction missed a relation, or to add relations you inferred from conversation.",
+      parameters: {
+        type: "object",
+        properties: {
+          subject: { type: "string", description: "Subject entity (e.g., 'George')" },
+          relation: { type: "string", description: "Relation type (e.g., 'has_doctor', 'owns', 'lives_in')" },
+          object: { type: "string", description: "Object entity (e.g., 'Dr. Mohamed', 'Edmonton')" },
+        },
+        required: ["subject", "relation", "object"],
+        additionalProperties: false,
+      },
+      async execute(_id, params, ctx) {
+        const ws = resolveWorkspace(ctx);
+        const triple = addTriple(ws, params.subject, params.relation, params.object);
+        if (!triple) {
+          return text(`Relation already exists: (${params.subject} --${params.relation}--> ${params.object})`);
+        }
+        return text(`OK: Added ${triple.id}: (${params.subject} --${params.relation}--> ${params.object})`);
+      },
+    });
+
+    // ─── episode_save ───
+    api.registerTool({
+      name: "episode_save",
+      description:
+        "Save a conversation episode (summary of what was discussed, decisions made, mood). Call at end of meaningful conversations. Enables 'what did we discuss last time about X?' queries.",
+      parameters: {
+        type: "object",
+        properties: {
+          summary: { type: "string", description: "1-3 sentence summary of the conversation" },
+          decisions: { type: "array", items: { type: "string" }, description: "Decisions or action items from the conversation" },
+          mood: { type: "string", description: "Emotional tone (e.g., 'relaxed', 'stressed', 'excited', 'serious')" },
+          topics: { type: "array", items: { type: "string" }, description: "Topic tags (e.g., ['vehicles', 'finance'])" },
+          participants: { type: "array", items: { type: "string" }, description: "Who was in the conversation" },
+        },
+        required: ["summary"],
+        additionalProperties: false,
+      },
+      async execute(_id, params, ctx) {
+        const ws = resolveWorkspace(ctx);
+        const ep = saveEpisode(ws, {
+          summary: params.summary,
+          decisions: params.decisions || [],
+          mood: params.mood || "",
+          topics: params.topics || [],
+          participants: params.participants || [],
+        });
+        indexEpisodeEmbedding(ws, ep).catch(() => {});
+        return text(`OK: Episode saved ${ep.id}. "${ep.summary.slice(0, 100)}..."\n  Decisions: ${ep.decisions.length}, Topics: ${ep.topics.join(", ") || "(none)"}, Mood: ${ep.mood || "(none)"}`);
+      },
+    });
+
+    // ─── episode_recall ───
+    api.registerTool({
+      name: "episode_recall",
+      description:
+        "Search past conversation episodes by topic/keyword, or get the most recent N episodes. Use to recall 'what did we discuss about X last time'.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query (topic, keyword). Omit to get recent episodes." },
+          last_n: { type: "number", description: "Number of episodes to return (default: 5)" },
+        },
+        additionalProperties: false,
+      },
+      async execute(_id, params, ctx) {
+        const ws = resolveWorkspace(ctx);
+        const lastN = params.last_n || 5;
+        const results = await recallEpisodes(ws, params.query || null, lastN);
+        if (results.length === 0) {
+          return text(params.query ? `No episodes found for: "${params.query}"` : "No episodes recorded yet.");
+        }
+        const fmt = results.map((ep, i) => {
+          const decisions = ep.decisions?.length ? `\n     Decisions: ${ep.decisions.join("; ")}` : "";
+          const mood = ep.mood ? ` [${ep.mood}]` : "";
+          return `[${i + 1}] (${ep.ts?.slice(0, 10)}) ${ep.summary}${mood}${decisions}`;
+        }).join("\n\n");
+        return text(`${results.length} episode(s):\n\n${fmt}`);
       },
     });
 
