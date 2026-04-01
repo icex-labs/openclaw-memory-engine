@@ -15,14 +15,15 @@ OpenClaw agents wake up fresh every session. Without persistent memory, they for
 
 ## The Solution
 
-Two-tier memory inspired by [MemGPT/Letta](https://github.com/cpacker/MemGPT):
+Five-layer memory architecture inspired by [MemGPT/Letta](https://github.com/cpacker/MemGPT):
 
-- **Core Memory** (~500 tokens) — user identity, relationship, preferences. Always loaded.
-- **Archival Memory** (unlimited) — facts, decisions, events. Retrieved on demand via hybrid semantic search.
+1. **Core Memory** (~500 tokens) — identity, relationship, preferences. Always loaded.
+2. **Archival Memory** (unlimited) — facts with importance scoring. Hybrid semantic search.
+3. **Knowledge Graph** — entity relations. "Who is my doctor?" → graph traversal.
+4. **Episodic Memory** — conversation summaries. "What did we discuss last time?"
+5. **Reflective Memory** — behavioral pattern analysis. "What topics dominate this week?"
 
-Plus: knowledge graph, episodic memory, behavioral reflection, importance scoring with forgetting curves, deduplication, SQLite backend, and a browsable HTML dashboard.
-
-The agent manages all of this autonomously.
+The agent manages all five layers autonomously using 19 purpose-built tools.
 
 ---
 
@@ -34,50 +35,126 @@ bash ~/.openclaw/extensions/memory-engine/setup.sh
 openclaw gateway restart
 ```
 
-`setup.sh` handles everything:
-- Interactive core memory setup (prompts for your name, location, role, etc.)
-- Configures `openclaw.json`
-- Installs daily maintenance scheduler (macOS LaunchAgent / Linux systemd / Windows schtasks)
-- Patches agent instructions (AGENTS.md)
-- Registers 4 automated cron jobs (reflection, consolidation, dedup, dashboard)
-- `--non-interactive` flag available for scripted installs
+### What setup.sh does
+
+1. **Interactive core memory setup** — prompts for name, location, role, relationship dynamic
+2. **Legacy data migration** — detects existing MEMORY.md / daily logs and imports them into archival (with dedup)
+3. **Platform scheduler** — installs daily maintenance (macOS LaunchAgent / Linux systemd / Windows schtasks)
+4. **Config patching** — enables plugin in `openclaw.json`
+5. **Agent instructions** — patches AGENTS.md with memory tool guide
+6. **Cron registration** — 4 automated jobs (reflection, consolidation, dedup, dashboard)
+7. **Embedding backfill** — on next gateway restart, missing embeddings are auto-computed in background
+
+`--non-interactive` flag available for scripted installs.
 
 ---
 
 ## Architecture
 
+### Memory Layers
+
 ```
-┌──────────────────────────────────────────────────────────┐
-│                   Agent Context Window                    │
-│                                                           │
-│   core_memory_read() ──→ core.json (~500 tokens)          │
-│                                                           │
-│   archival_search("query") ──→ archival.jsonl (unlimited)  │
-│     keyword (2×) + embedding (5×) + recency + decay        │
-│                                                           │
-│   graph_query("entity") ──→ graph.jsonl (relations)        │
-│     "who is my doctor?" → traverse knowledge graph         │
-│                                                           │
-│   episode_recall("topic") ──→ episodes.jsonl               │
-│     "what did we discuss last time?" → conversation recall  │
-│                                                           │
-│   memory_reflect() ──→ behavioral pattern analysis         │
-│   memory_dashboard() ──→ browsable HTML report             │
-│   memory_export() ──→ full backup for migration            │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                       Agent Context Window                       │
+│                                                                   │
+│  ┌─ Layer 1: Core Memory ─────────────────────────────────────┐  │
+│  │  core_memory_read() → core.json (~500 tokens)              │  │
+│  │  Identity, relationship, preferences, current_focus         │  │
+│  │  Agent reads on session start, updates atomically           │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                   │
+│  ┌─ Layer 2: Archival Memory ─────────────────────────────────┐  │
+│  │  archival_insert(fact, entity, tags, importance)            │  │
+│  │  archival_search(query) → hybrid 5-signal ranking          │  │
+│  │  Unlimited JSONL. Each record: content + entity + tags +   │  │
+│  │  importance (1-10) + access tracking + embedding vector     │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                   │
+│  ┌─ Layer 3: Knowledge Graph ─────────────────────────────────┐  │
+│  │  graph_query(entity, relation?, depth?)                     │  │
+│  │  Triple store: (subject, relation, object)                  │  │
+│  │  Auto-extracted from archival_insert content                │  │
+│  │  "who is my doctor?" → User→has_doctor→Dr. Smith            │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                   │
+│  ┌─ Layer 4: Episodic Memory ─────────────────────────────────┐  │
+│  │  episode_save(summary, decisions, mood, topics)             │  │
+│  │  episode_recall(query) → hybrid search over conversations   │  │
+│  │  "what did we discuss about the car?" → full context        │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                   │
+│  ┌─ Layer 5: Reflective Memory ───────────────────────────────┐  │
+│  │  memory_reflect(window_days) → pattern analysis report      │  │
+│  │  Topic trends, time distribution, mood shifts,              │  │
+│  │  neglected entities, forgetting candidates                  │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### Multi-Agent Support
+### Data Flow
 
-Each agent automatically gets its own memory based on its configured workspace. Uses OpenClaw's session key to resolve the correct workspace at tool registration time — zero configuration needed.
+```
+User says something important
+    │
+    ▼
+archival_insert(content, entity, tags, importance)
+    │
+    ├──→ archival.jsonl (append fact)
+    ├──→ graph.jsonl (auto-extract relations)
+    └──→ embeddings cache (background, async)
 
-Privacy flag: `"sharing": false` in plugin config for multi-user setups.
+User asks a question
+    │
+    ▼
+archival_search(query)
+    │
+    ├──→ Keyword matching (2× weight per term)
+    ├──→ Embedding cosine similarity (5× weight)
+    ├──→ Recency boost (0-1, decays over 1 year)
+    ├──→ Access frequency boost (0-0.5)
+    └──→ Importance × forgetting curve (0.5× weight)
+
+End of conversation
+    │
+    ▼
+episode_save(summary, decisions, mood)
+    │
+    └──→ episodes.jsonl + embedding
+
+Gateway restart
+    │
+    ▼
+Auto-detect missing embeddings across ALL workspaces
+    │
+    └──→ Batch backfill (100/batch, 200ms rate limit, crash-safe)
+```
+
+### Multi-Agent Isolation
+
+```
+openclaw.json
+  agents:
+    ├── main  → workspace/          ← Agent A's memory (2700+ records)
+    ├── wife  → workspace-wife/     ← Agent B's memory (300+ records)
+    └── discord → workspace/        ← Shares Agent A's memory
+
+Plugin uses ToolFactory pattern:
+  ctx.sessionKey = "agent:wife:telegram:..."
+                         ↓
+  extractAgentId() → "wife"
+                         ↓
+  openclaw.json lookup → workspace-wife/
+                         ↓
+  All 19 tools bound to correct workspace via closure
+```
+
+Each agent's tools are bound to its own workspace at registration time. No cross-contamination. Privacy flag `"sharing": false` available for multi-user setups.
 
 ---
 
 ## Tools (19)
 
-### Core Memory — Identity
+### Core Memory — Identity (3)
 
 | Tool | Description |
 |------|-------------|
@@ -85,46 +162,48 @@ Privacy flag: `"sharing": false` in plugin config for multi-user setups.
 | `core_memory_replace` | Update a field by dot-path (e.g., `user.location`). Auto-parses JSON strings. 3KB hard limit. |
 | `core_memory_append` | Append to an array field (e.g., `current_focus`). |
 
-### Archival Memory — Facts
+### Archival Memory — Facts (5)
 
 | Tool | Description |
 |------|-------------|
-| `archival_insert` | Store a fact with entity, tags, and importance (1-10). Auto-extracts knowledge graph triples. |
-| `archival_search` | Hybrid search: keyword + semantic + recency + access decay + importance. |
-| `archival_update` | Correct an existing record by ID. |
-| `archival_delete` | Remove an outdated record. |
+| `archival_insert` | Store a fact with entity, tags, and importance (1-10). Auto-extracts knowledge graph triples. Embedding computed in background. |
+| `archival_search` | Hybrid 5-signal search: keyword + semantic + recency + access + importance. |
+| `archival_update` | Correct an existing record by ID. Re-indexes embedding. |
+| `archival_delete` | Remove an outdated record. Cleans embedding cache. |
 | `archival_stats` | Record count, entity/tag distribution, embedding coverage, storage size. |
 
-### Knowledge Graph — Relations
+### Knowledge Graph — Relations (2)
 
 | Tool | Description |
 |------|-------------|
-| `graph_query` | Traverse from entity with depth control. |
-| `graph_add` | Manually add a relation triple. |
+| `graph_query` | Traverse from entity with depth control. Answers relational questions. |
+| `graph_add` | Manually add a relation triple `(subject, relation, object)`. |
 
-### Episodic Memory — Conversations
+Auto-extraction patterns on `archival_insert`: has_doctor, lives_in, has_condition, treated_by, owns, works_at, attends, price, has_lawyer, spouse, has_child.
 
-| Tool | Description |
-|------|-------------|
-| `episode_save` | Save conversation summary, decisions, mood, topics. |
-| `episode_recall` | Search past conversations by topic or get recent N. |
-
-### Intelligence
+### Episodic Memory — Conversations (2)
 
 | Tool | Description |
 |------|-------------|
-| `memory_reflect` | Analyze behavioral patterns: topic trends, time distribution, mood shifts, forgetting candidates. |
-| `archival_deduplicate` | Find and remove near-duplicates via embedding cosine similarity. |
-| `memory_consolidate` | Extract structured facts from text. Sentence-level splitting (Chinese + English), entity inference, dedup. |
+| `episode_save` | Save conversation summary with decisions, mood, topics, participants. |
+| `episode_recall` | Search past conversations by topic/keyword, or get recent N. Hybrid search with embedding. |
 
-### Backup & Admin
+### Intelligence (3)
 
 | Tool | Description |
 |------|-------------|
-| `memory_export` | Full snapshot: core + archival + embeddings → JSON file. |
-| `memory_import` | Restore from snapshot. Merge or replace mode. |
-| `memory_migrate` | Migrate from JSONL to SQLite with FTS5 full-text search. |
-| `memory_dashboard` | Generate self-contained HTML dashboard. |
+| `memory_reflect` | Statistical analysis: topic frequency, time-of-day distribution, mood trend, importance distribution, neglected entities, forgetting candidates. Configurable window (7/14/30 days). |
+| `archival_deduplicate` | Find near-duplicates via embedding cosine similarity (≥0.92 threshold). Preview or auto-remove. |
+| `memory_consolidate` | Extract structured facts from text blocks. Sentence-level splitting (Chinese + English), generic entity inference, keyword dedup against existing records. |
+
+### Backup & Admin (4)
+
+| Tool | Description |
+|------|-------------|
+| `memory_export` | Full snapshot: core + archival + embeddings → single JSON file. Versioned format. |
+| `memory_import` | Restore from snapshot. `merge` (add missing) or `replace` (overwrite) mode. |
+| `memory_migrate` | Migrate from JSONL to SQLite with FTS5 full-text search. Preserves JSONL as backup. |
+| `memory_dashboard` | Generate self-contained HTML dashboard: facts (searchable), graph, episodes, core memory, reflection report. Dark theme. |
 
 ---
 
@@ -135,12 +214,26 @@ Privacy flag: `"sharing": false` in plugin config for multi-user setups.
 | Signal | Weight | Description |
 |--------|--------|-------------|
 | Keyword | 2× per term | Term presence in content + entity + tags |
-| Semantic | 5× | Cosine similarity via OpenAI `text-embedding-3-small` (512d) |
-| Recency | 0–1 | Linear decay over 1 year |
-| Access | 0–0.5 | Boost for recently accessed records |
-| Importance | 0.5× | Weighted by forgetting curve: `importance × e^(-0.01 × days)` |
+| Semantic | 5× | Cosine similarity via OpenAI `text-embedding-3-small` (512 dimensions) |
+| Recency | 0–1 | Linear decay over 1 year from creation date |
+| Access | 0–0.5 | Boost for recently accessed records (decays over 180 days) |
+| Importance | 0.5× | Forgetting curve: `importance × e^(-0.01 × days_since_access)` |
 
-Falls back to keyword-only if no OpenAI key is configured. Cost with embeddings: ~$0.001/session.
+Falls back to keyword-only if no OpenAI key is configured — no errors, just reduced quality. Cost with embeddings: ~$0.001/session for search, ~$0.02/1M tokens for batch indexing.
+
+---
+
+## Self-Healing
+
+The plugin automatically detects and fixes issues on gateway restart:
+
+| Issue | Auto-fix |
+|-------|----------|
+| Missing embeddings after migration | Batch backfill across all workspaces (100/batch, rate limited) |
+| Core memory value serialized as JSON string | Auto-parse on `core_memory_replace` |
+| Near-duplicate facts accumulating | Weekly `archival_deduplicate` cron |
+| Daily logs piling up | Daily `memory-maintenance.sh` merges 7-day-old logs into weekly summaries |
+| Stale `current_focus` items | Agent prompted to update via `memory_reflect` analysis |
 
 ---
 
@@ -165,23 +258,51 @@ Falls back to keyword-only if no OpenAI key is configured. Cost with embeddings:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `workspace` | Auto-resolved | Override workspace directory |
+| `workspace` | Auto-resolved per agent | Override workspace directory |
 | `coreSizeLimit` | `3072` (3KB) | Max core.json size |
 | `sharing` | `true` | Cross-agent memory sharing. Set `false` for multi-user privacy. |
 
-Semantic search requires `OPENAI_API_KEY` in environment (optional).
+Semantic search requires `OPENAI_API_KEY` in environment (optional — graceful degradation).
 
 ---
 
 ## Automated Maintenance
 
-| Schedule | Job | What it does |
+### Cron Jobs (registered by setup.sh)
+
+| Schedule | Job | Description |
 |----------|-----|-------------|
-| Daily 9:00am | Reflection | Analyze memory patterns, store observations |
-| Every 6h | Consolidation | Extract missed facts from daily logs |
-| Weekly Sunday | Deduplication | Clean near-duplicate records |
-| Daily 9:30am | Dashboard | Refresh browsable HTML report |
-| Daily 3:00am | File cleanup | Merge old logs into weekly summaries, archive old summaries |
+| Daily 9:00am | `memory-reflect-daily` | Analyze patterns, store observations |
+| Every 6h | `memory-consolidate-6h` | Extract missed facts from daily logs |
+| Weekly Sunday 4am | `memory-dedup-weekly` | Clean near-duplicate records |
+| Daily 9:30am | `memory-dashboard-daily` | Refresh browsable HTML dashboard |
+
+### File Maintenance (daily 3am)
+
+| Action | Trigger | Description |
+|--------|---------|-------------|
+| Size check | MEMORY.md >4KB | Warn alert |
+| Size check | MEMORY.md >5KB | Critical alert |
+| Log merge | Daily logs >7 days old | Merge into weekly summaries |
+| Archive | Weekly summaries >60 days | Move to archive/ |
+| Topic check | Topic file >8KB | Warn alert |
+
+Alerts written to `memory/maintenance-alerts.json`, checked by agent during heartbeats.
+
+---
+
+## Storage Files
+
+| File | Purpose | Growth | Format |
+|------|---------|--------|--------|
+| `memory/core.json` | Identity block | Fixed ~1-3KB | JSON |
+| `memory/archival.jsonl` | Fact storage | Grows with usage | JSONL |
+| `memory/graph.jsonl` | Knowledge graph | Grows with relations | JSONL |
+| `memory/episodes.jsonl` | Conversation summaries | Grows per conversation | JSONL |
+| `memory/archival.embeddings.json` | Embedding vectors | ~2KB per record | JSON |
+| `memory/memory.sqlite` | SQLite index (optional) | After `memory_migrate` | SQLite |
+| `memory/dashboard.html` | Browsable report | Regenerated daily | HTML |
+| `memory/maintenance-alerts.json` | Health alerts | Regenerated daily | JSON |
 
 ---
 
@@ -189,41 +310,85 @@ Semantic search requires `OPENAI_API_KEY` in environment (optional).
 
 ```
 memory-engine/
-├── index.js                # Plugin entry — 19 tools (factory pattern)
+├── index.js                  # Plugin entry — 19 tools via ToolFactory pattern
 ├── lib/
-│   ├── paths.js            # Constants, workspace resolution
-│   ├── core.js             # Core memory CRUD + auto-parse
-│   ├── archival.js         # JSONL storage + in-memory cache
-│   ├── embedding.js        # OpenAI embedding API + cache
-│   ├── search.js           # Hybrid 5-signal search
-│   ├── graph.js            # Knowledge graph: triples + traversal
-│   ├── episodes.js         # Episodic memory: save + recall
-│   ├── reflection.js       # Statistical pattern analysis
-│   ├── consolidate.js      # Text → facts extraction
-│   ├── dedup.js            # Embedding similarity dedup
-│   ├── backup.js           # Export / import
-│   ├── store-sqlite.js     # SQLite backend (FTS5)
-│   └── dashboard.js        # HTML dashboard generator
+│   ├── paths.js              # Constants, multi-workspace resolution, agent mapping
+│   ├── core.js               # Core memory CRUD + dot-path + auto-parse
+│   ├── archival.js           # JSONL storage + in-memory cache
+│   ├── embedding.js          # OpenAI embedding API + cache + batch backfill
+│   ├── search.js             # Hybrid 5-signal search with forgetting curve
+│   ├── graph.js              # Knowledge graph: triple store + traversal + auto-extract
+│   ├── episodes.js           # Episodic memory: save + hybrid recall
+│   ├── reflection.js         # Statistical pattern analysis (8 dimensions)
+│   ├── consolidate.js        # Text → structured facts (sentence split + entity inference)
+│   ├── dedup.js              # Embedding cosine similarity deduplication
+│   ├── backup.js             # Export / import with format versioning
+│   ├── store-sqlite.js       # SQLite backend with FTS5 + WAL mode
+│   └── dashboard.js          # Self-contained HTML dashboard generator
 ├── extras/
-│   ├── memory-maintenance.sh
+│   ├── memory-maintenance.sh # Daily file cleanup script
+│   ├── migrate-legacy.mjs    # Standalone legacy data migration tool
 │   └── auto-consolidation-crons.json
-├── setup.sh                # One-command install
-├── .claude/CLAUDE.md       # Dev guide
-├── ROADMAP.md
-├── openclaw.plugin.json
+├── setup.sh                  # One-command install (interactive, cross-platform)
+├── .claude/CLAUDE.md         # Development guide for Claude Code
+├── ROADMAP.md                # Planned features
+├── openclaw.plugin.json      # Plugin manifest with config schema
 └── package.json
 ```
 
+---
+
+## Migrating from File-Based Memory
+
+If you already have MEMORY.md and daily log files, `setup.sh` handles migration automatically:
+
+```
+📦 Found 15 legacy memory files.
+   Migrate into archival memory? [Y/n]: Y
+  MEMORY.md: +87 facts
+  2026-03-28.md: +42 facts
+  2026-03-30.md: +29 facts
+✅ Migration complete: 158 facts imported, 3 skipped
+```
+
+Manual migration: `node ~/.openclaw/extensions/memory-engine/extras/migrate-legacy.mjs [workspace_path]`
+
+After migration, embeddings are auto-computed on next gateway restart (no manual step needed).
+
+---
+
 ## Platforms
 
-| Platform | Scheduler | Status |
-|----------|----------|--------|
+| Platform | Maintenance Scheduler | Status |
+|----------|----------------------|--------|
 | macOS | LaunchAgent | Full support |
-| Linux | systemd timer | Full support |
+| Linux | systemd user timer | Full support |
 | Windows | schtasks | Guided setup |
+
+---
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for details.
+
+- [x] Core memory with size guard + auto-parse
+- [x] Archival CRUD + hybrid 5-signal search
+- [x] Knowledge graph with auto-extraction
+- [x] Episodic memory with conversation recall
+- [x] Importance scoring + forgetting curves
+- [x] Behavioral reflection + auto-consolidation
+- [x] SQLite backend (FTS5) + HTML dashboard
+- [x] Multi-workspace isolation (ToolFactory pattern)
+- [x] Legacy data migration + embedding auto-backfill
+- [x] Cross-platform support (macOS / Linux / Windows)
+- [ ] LanceDB vector-native backend
+- [ ] Memory importance auto-rating via LLM
+- [ ] Web dashboard served via gateway HTTP route
 
 ---
 
 ## License
 
-MIT — Built for [OpenClaw](https://openclaw.ai). Inspired by [MemGPT/Letta](https://github.com/cpacker/MemGPT).
+MIT
+
+Built for [OpenClaw](https://openclaw.ai). Inspired by [MemGPT/Letta](https://github.com/cpacker/MemGPT).
