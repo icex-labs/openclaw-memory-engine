@@ -50,6 +50,16 @@ function text(msg) {
   return { content: [{ type: "text", text: msg }] };
 }
 
+/** Resolve workspace, accepting optional agent param for multi-agent setups. */
+function ws(ctx, params) {
+  return resolveWorkspace(ctx, params?.agent);
+}
+
+/** Common agent parameter for all tools (optional). */
+const AGENT_PARAM = {
+  agent: { type: "string", description: "Agent ID for multi-agent setups (e.g., 'wife'). Omit for default agent." },
+};
+
 // ═══════════════════════════════════════════════════════════════════
 // Plugin entry
 // ═══════════════════════════════════════════════════════════════════
@@ -68,7 +78,7 @@ export default definePluginEntry({
         "Read the entire core memory block. Contains user identity, relationship, preferences, and current focus. Call at session start.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
       async execute(_id, _params, ctx) {
-        return text(JSON.stringify(readCore(resolveWorkspace(ctx)), null, 2));
+        return text(JSON.stringify(readCore(ws(ctx, _params)), null, 2));
       },
     });
 
@@ -87,9 +97,9 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
+        const wsp = ws(ctx, params);
         const limit = getCoreSizeLimit(ctx);
-        const core = readCore(ws);
+        const core = readCore(wsp);
         const value = autoParse(params.value);
         const old = dotSet(core, params.key, value);
         const size = JSON.stringify(core, null, 2).length;
@@ -97,7 +107,7 @@ export default definePluginEntry({
           dotSet(core, params.key, old);
           return text(`ERROR: Would exceed ${limit}B limit (${size}B). Use archival_insert for details.`);
         }
-        writeCore(ws, core);
+        writeCore(wsp, core);
         return text(`OK: ['${params.key}'] updated. Old: ${JSON.stringify(old)} → New: ${JSON.stringify(value)}`);
       },
     });
@@ -117,9 +127,9 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
+        const wsp = ws(ctx, params);
         const limit = getCoreSizeLimit(ctx);
-        const core = readCore(ws);
+        const core = readCore(wsp);
         let arr = dotGet(core, params.key);
         if (!Array.isArray(arr)) {
           arr = arr != null ? [arr] : [];
@@ -131,7 +141,7 @@ export default definePluginEntry({
           arr.pop();
           return text(`ERROR: Would exceed ${limit}B limit. Remove an item first or use archival_insert.`);
         }
-        writeCore(ws, core);
+        writeCore(wsp, core);
         return text(`OK: Appended "${params.item}" to ${params.key} (now ${arr.length} items)`);
       },
     });
@@ -153,21 +163,21 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
+        const wsp = ws(ctx, params);
         const imp = Math.min(10, Math.max(1, params.importance ?? 5));
-        const record = appendRecord(ws, {
+        const record = appendRecord(wsp, {
           content: params.content,
           entity: params.entity || "",
           tags: params.tags || [],
           importance: imp,
         });
-        indexEmbedding(ws, record).catch(() => {});
+        indexEmbedding(wsp, record).catch(() => {});
 
         // Auto-extract knowledge graph triples
         const triples = extractTriples(params.content);
         const graphResults = [];
         for (const t of triples) {
-          const added = addTriple(ws, t.s, t.r, t.o, record.id);
+          const added = addTriple(wsp, t.s, t.r, t.o, record.id);
           if (added) graphResults.push(`(${t.s} --${t.r}--> ${t.o})`);
         }
 
@@ -194,9 +204,9 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
+        const wsp = ws(ctx, params);
         const topK = Math.min(params.top_k || DEFAULT_TOP_K, MAX_TOP_K);
-        const results = await hybridSearch(ws, params.query, topK);
+        const results = await hybridSearch(wsp, params.query, topK);
         if (results.length === 0) return text(`No archival memories found for: "${params.query}"`);
         return text(`Found ${results.length} results:\n${formatResults(results)}`);
       },
@@ -219,8 +229,8 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
-        const records = loadArchival(ws);
+        const wsp = ws(ctx, params);
+        const records = loadArchival(wsp);
         const idx = records.findIndex((r) => r.id === params.id);
         if (idx === -1) return text(`ERROR: Record ${params.id} not found.`);
         const old = records[idx].content;
@@ -228,11 +238,11 @@ export default definePluginEntry({
         records[idx].updated_at = new Date().toISOString();
         if (params.entity !== undefined) records[idx].entity = params.entity;
         if (params.tags !== undefined) records[idx].tags = params.tags;
-        rewriteArchival(ws, records);
-        const embCache = loadEmbeddingCache(ws);
+        rewriteArchival(wsp, records);
+        const embCache = loadEmbeddingCache(wsp);
         delete embCache[params.id];
-        saveEmbeddingCache(ws);
-        indexEmbedding(ws, records[idx]).catch(() => {});
+        saveEmbeddingCache(wsp);
+        indexEmbedding(wsp, records[idx]).catch(() => {});
         return text(`OK: Updated ${params.id}. Old: "${old.slice(0, 60)}..." → New: "${params.content.slice(0, 60)}..."`);
       },
     });
@@ -248,15 +258,15 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
-        const records = loadArchival(ws);
+        const wsp = ws(ctx, params);
+        const records = loadArchival(wsp);
         const idx = records.findIndex((r) => r.id === params.id);
         if (idx === -1) return text(`ERROR: Record ${params.id} not found.`);
         const removed = records.splice(idx, 1)[0];
-        rewriteArchival(ws, records);
-        const embCache = loadEmbeddingCache(ws);
+        rewriteArchival(wsp, records);
+        const embCache = loadEmbeddingCache(wsp);
         delete embCache[params.id];
-        saveEmbeddingCache(ws);
+        saveEmbeddingCache(wsp);
         return text(`OK: Deleted ${params.id}. Was: "${removed.content.slice(0, 80)}..."`);
       },
     });
@@ -266,10 +276,10 @@ export default definePluginEntry({
       name: "archival_stats",
       description: "Show archival memory statistics.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
-      async execute(_id, _params, ctx) {
-        const ws = resolveWorkspace(ctx);
-        const records = loadArchival(ws);
-        const embCache = loadEmbeddingCache(ws);
+      async execute(_id, params, ctx) {
+        const wsp = ws(ctx, params);
+        const records = loadArchival(wsp);
+        const embCache = loadEmbeddingCache(wsp);
         const entityCounts = {};
         const tagCounts = {};
         let recentCount = 0;
@@ -281,7 +291,7 @@ export default definePluginEntry({
         }
         const topE = Object.entries(entityCounts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([e, c]) => `  ${e}: ${c}`).join("\n");
         const topT = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([t, c]) => `  ${t}: ${c}`).join("\n");
-        const p = archivalPath(ws);
+        const p = archivalPath(wsp);
         const fileSize = existsSync(p) ? readFileSync(p).length : 0;
         return text([
           `Total records: ${records.length}`,
@@ -307,14 +317,14 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
-        const dupes = await findDuplicates(ws);
+        const wsp = ws(ctx, params);
+        const dupes = await findDuplicates(wsp);
         if (dupes.length === 0) return text("No duplicates found. Archival memory is clean.");
         const preview = dupes
           .map((d, i) => `[${i + 1}] sim=${d.similarity}\n  KEEP: ${d.keep.content.slice(0, 80)}\n  DROP: ${d.drop.content.slice(0, 80)}`)
           .join("\n\n");
         if (params.apply) {
-          const { removed, remaining } = applyDedup(ws, dupes);
+          const { removed, remaining } = applyDedup(wsp, dupes);
           return text(`Removed ${removed} duplicates (${remaining} remaining):\n\n${preview}`);
         }
         return text(`Found ${dupes.length} potential duplicates (preview, call with apply=true to remove):\n\n${preview}`);
@@ -337,7 +347,7 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
+        const wsp = ws(ctx, params);
         const result = await consolidateText(
           ws, params.text, params.default_entity || "", params.default_tags || [],
         );
@@ -367,9 +377,9 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
+        const wsp = ws(ctx, params);
         const depth = Math.min(params.depth || 2, 4);
-        const results = queryGraph(ws, params.entity, params.relation || null, depth);
+        const results = queryGraph(wsp, params.entity, params.relation || null, depth);
         if (results.length === 0) {
           return text(`No graph connections found for entity: "${params.entity}"`);
         }
@@ -396,8 +406,8 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
-        const triple = addTriple(ws, params.subject, params.relation, params.object);
+        const wsp = ws(ctx, params);
+        const triple = addTriple(wsp, params.subject, params.relation, params.object);
         if (!triple) {
           return text(`Relation already exists: (${params.subject} --${params.relation}--> ${params.object})`);
         }
@@ -423,15 +433,15 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
-        const ep = saveEpisode(ws, {
+        const wsp = ws(ctx, params);
+        const ep = saveEpisode(wsp, {
           summary: params.summary,
           decisions: params.decisions || [],
           mood: params.mood || "",
           topics: params.topics || [],
           participants: params.participants || [],
         });
-        indexEpisodeEmbedding(ws, ep).catch(() => {});
+        indexEpisodeEmbedding(wsp, ep).catch(() => {});
         return text(`OK: Episode saved ${ep.id}. "${ep.summary.slice(0, 100)}..."\n  Decisions: ${ep.decisions.length}, Topics: ${ep.topics.join(", ") || "(none)"}, Mood: ${ep.mood || "(none)"}`);
       },
     });
@@ -450,9 +460,9 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
+        const wsp = ws(ctx, params);
         const lastN = params.last_n || 5;
-        const results = await recallEpisodes(ws, params.query || null, lastN);
+        const results = await recallEpisodes(wsp, params.query || null, lastN);
         if (results.length === 0) {
           return text(params.query ? `No episodes found for: "${params.query}"` : "No episodes recorded yet.");
         }
@@ -483,9 +493,9 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
+        const wsp = ws(ctx, params);
         const window = Math.min(params.window_days || 7, 30);
-        const analysis = analyzePatterns(ws, window);
+        const analysis = analyzePatterns(wsp, window);
         const report = formatReflection(analysis);
         return text(report);
       },
@@ -504,8 +514,8 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
-        const { path, stats } = exportMemory(ws, params.output_path);
+        const wsp = ws(ctx, params);
+        const { path, stats } = exportMemory(wsp, params.output_path);
         const sizeKB = (readFileSync(path).length / 1024).toFixed(1);
         return text(`OK: Exported to ${path} (${sizeKB}KB)\n  Core: ${stats.core_size}B\n  Archival: ${stats.archival_count} records\n  Embeddings: ${stats.embedding_count}`);
       },
@@ -526,9 +536,9 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
+        const wsp = ws(ctx, params);
         try {
-          const result = importMemory(ws, params.input_path, params.mode || "merge");
+          const result = importMemory(wsp, params.input_path, params.mode || "merge");
           return text(`OK: ${result}`);
         } catch (e) {
           return text(`ERROR: ${e.message}`);
@@ -546,10 +556,10 @@ export default definePluginEntry({
         properties: {},
         additionalProperties: false,
       },
-      async execute(_id, _params, ctx) {
-        const ws = resolveWorkspace(ctx);
+      async execute(_id, params, ctx) {
+        const wsp = ws(ctx, params);
         try {
-          const result = migrateFromJsonl(ws);
+          const result = migrateFromJsonl(wsp);
           return text([
             `OK: Migration complete.`,
             `  Archival: ${result.archival} records`,
@@ -579,9 +589,9 @@ export default definePluginEntry({
         additionalProperties: false,
       },
       async execute(_id, params, ctx) {
-        const ws = resolveWorkspace(ctx);
+        const wsp = ws(ctx, params);
         try {
-          const outPath = generateDashboard(ws, params.output_path);
+          const outPath = generateDashboard(wsp, params.output_path);
           return text(`OK: Dashboard generated at ${outPath}\nOpen in browser: file://${outPath}`);
         } catch (e) {
           return text(`ERROR: Dashboard generation failed: ${e.message}`);
