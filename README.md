@@ -1,142 +1,152 @@
 # @icex-labs/openclaw-memory-engine
 
-> Give your AI agent a brain that survives restarts.
+> Persistent, structured memory for AI agents — inspired by MemGPT.
 
 [![npm](https://img.shields.io/npm/v/@icex-labs/openclaw-memory-engine)](https://www.npmjs.com/package/@icex-labs/openclaw-memory-engine)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A [MemGPT](https://github.com/cpacker/MemGPT)-inspired memory plugin for [OpenClaw](https://openclaw.ai). Your agent gets 12 tools to manage its own memory — what to remember, what to recall, what to forget.
+An [OpenClaw](https://openclaw.ai) plugin that gives your agent 19 tools to manage its own memory — what to remember, what to recall, what to forget, and what patterns to notice.
 
-**The problem:** OpenClaw agents wake up fresh every session. Without persistent memory, they forget who you are.
+---
 
-**The fix:** Two-tier memory architecture:
-- **Core Memory** (~500 tokens) — identity, relationship, preferences. Always loaded.
+## The Problem
+
+OpenClaw agents wake up fresh every session. Without persistent memory, they forget who you are, what you discussed, and what matters to you. Stuffing everything into a system prompt bloats the context window and degrades quality.
+
+## The Solution
+
+Two-tier memory inspired by [MemGPT/Letta](https://github.com/cpacker/MemGPT):
+
+- **Core Memory** (~500 tokens) — user identity, relationship, preferences. Always loaded.
 - **Archival Memory** (unlimited) — facts, decisions, events. Retrieved on demand via hybrid semantic search.
 
-The agent manages both tiers autonomously using purpose-built tools.
+Plus: knowledge graph, episodic memory, behavioral reflection, importance scoring with forgetting curves, deduplication, SQLite backend, and a browsable HTML dashboard.
+
+The agent manages all of this autonomously.
 
 ---
 
 ## Install
 
 ```bash
-git clone git@github.com:icex-labs/openclaw-memory-engine.git ~/.openclaw/extensions/memory-engine
+openclaw plugins install @icex-labs/openclaw-memory-engine
 bash ~/.openclaw/extensions/memory-engine/setup.sh
-nano ~/.openclaw/workspace/memory/core.json   # fill in your info
 openclaw gateway restart
 ```
 
-Or from npm:
-```bash
-npm install -g @icex-labs/openclaw-memory-engine
-```
-
-`setup.sh` handles everything: enables the plugin in `openclaw.json`, creates template files, installs the daily maintenance cron, and patches your agent's instructions.
-
----
-
-## How It Works
-
-```
-┌──────────────────────────────────────────────────────┐
-│                 Agent Context Window                  │
-│                                                       │
-│   Session start → core_memory_read()                  │
-│                   └─→ core.json (~500 tokens)         │
-│                                                       │
-│   "Where does Alice's doctor work?"                  │
-│   → archival_search("doctor")                         │
-│     └─→ keyword match + embedding similarity          │
-│         + recency boost + access frequency             │
-│         → "Dr. Smith, City Medical..."    │
-│                                                       │
-│   Alice says something new                           │
-│   → archival_insert(fact, entity, tags)               │
-│     └─→ archival.jsonl + background embedding         │
-│                                                       │
-│   End of conversation                                 │
-│   → memory_consolidate(summary)                       │
-│     └─→ split sentences → infer entities → dedup      │
-│         → batch insert                                │
-└──────────────────────────────────────────────────────┘
-```
+`setup.sh` handles everything:
+- Interactive core memory setup (prompts for your name, location, role, etc.)
+- Configures `openclaw.json`
+- Installs daily maintenance scheduler (macOS LaunchAgent / Linux systemd / Windows schtasks)
+- Patches agent instructions (AGENTS.md)
+- Registers 4 automated cron jobs (reflection, consolidation, dedup, dashboard)
+- `--non-interactive` flag available for scripted installs
 
 ---
 
-## Tools (12)
+## Architecture
 
-### Core Memory — Your Identity
-
-| Tool | What it does |
-|------|-------------|
-| `core_memory_read` | Load the identity block. Call every session start. |
-| `core_memory_replace` | Update a field by dot-path (`user.location`, `current_focus`). Auto-parses JSON strings. 3KB hard limit. |
-| `core_memory_append` | Append to an array field (`current_focus`). Creates array if needed. |
-
-Core memory lives in `memory/core.json`:
-
-```json
-{
-  "user": { "name": "Alice", "location": "New York", "language": "bilingual" },
-  "relationship": { "dynamic": "intimate companion", "trust": "deep" },
-  "preferences": { "config_rule": "don't touch openclaw.json" },
-  "current_focus": ["quant trading", "immigration case"]
-}
+```
+┌──────────────────────────────────────────────────────────┐
+│                   Agent Context Window                    │
+│                                                           │
+│   core_memory_read() ──→ core.json (~500 tokens)          │
+│                                                           │
+│   archival_search("query") ──→ archival.jsonl (unlimited)  │
+│     keyword (2×) + embedding (5×) + recency + decay        │
+│                                                           │
+│   graph_query("entity") ──→ graph.jsonl (relations)        │
+│     "who is my doctor?" → traverse knowledge graph         │
+│                                                           │
+│   episode_recall("topic") ──→ episodes.jsonl               │
+│     "what did we discuss last time?" → conversation recall  │
+│                                                           │
+│   memory_reflect() ──→ behavioral pattern analysis         │
+│   memory_dashboard() ──→ browsable HTML report             │
+│   memory_export() ──→ full backup for migration            │
+└──────────────────────────────────────────────────────────┘
 ```
 
-### Archival Memory — Your Long-Term Storage
+### Multi-Agent Support
 
-| Tool | What it does |
-|------|-------------|
-| `archival_insert` | Store a fact. Tags it with `entity` + `tags`. Computes embedding in background. |
-| `archival_search` | Hybrid search: keyword (2×) + semantic similarity (5×) + recency (0-1) + access decay (0-0.5). |
-| `archival_update` | Correct an existing record by ID. Re-indexes embedding. |
-| `archival_delete` | Remove an outdated record. Cleans up embedding cache. |
-| `archival_stats` | Dashboard: record count, embedding coverage, entity/tag distribution, storage size. |
+Each agent automatically gets its own memory based on its configured workspace. Uses OpenClaw's session key to resolve the correct workspace at tool registration time — zero configuration needed.
 
-Each record in `memory/archival.jsonl`:
-
-```json
-{"id":"arch-17120-abc","ts":"2026-04-01","content":"Alice's doctor is Dr. Smith","entity":"Alice","tags":["health"],"access_count":3}
-```
-
-### Maintenance — Keep It Clean
-
-| Tool | What it does |
-|------|-------------|
-| `archival_deduplicate` | Find near-duplicates via embedding cosine similarity (≥0.92). Preview or auto-remove. |
-| `memory_consolidate` | Extract facts from text blocks. Splits by sentence (中文/English), infers entity, deduplicates, batch inserts. |
-
-### Backup — Never Lose Your Memory
-
-| Tool | What it does |
-|------|-------------|
-| `memory_export` | Snapshot core + archival + embeddings → single JSON file. |
-| `memory_import` | Restore from snapshot. `merge` (add missing) or `replace` (overwrite all). |
+Privacy flag: `"sharing": false` in plugin config for multi-user setups.
 
 ---
 
-## Search Quality
+## Tools (19)
 
-`archival_search` uses four signals:
+### Core Memory — Identity
 
-| Signal | Weight | How |
-|--------|--------|-----|
+| Tool | Description |
+|------|-------------|
+| `core_memory_read` | Load identity block. Call every session start. |
+| `core_memory_replace` | Update a field by dot-path (e.g., `user.location`). Auto-parses JSON strings. 3KB hard limit. |
+| `core_memory_append` | Append to an array field (e.g., `current_focus`). |
+
+### Archival Memory — Facts
+
+| Tool | Description |
+|------|-------------|
+| `archival_insert` | Store a fact with entity, tags, and importance (1-10). Auto-extracts knowledge graph triples. |
+| `archival_search` | Hybrid search: keyword + semantic + recency + access decay + importance. |
+| `archival_update` | Correct an existing record by ID. |
+| `archival_delete` | Remove an outdated record. |
+| `archival_stats` | Record count, entity/tag distribution, embedding coverage, storage size. |
+
+### Knowledge Graph — Relations
+
+| Tool | Description |
+|------|-------------|
+| `graph_query` | Traverse from entity with depth control. |
+| `graph_add` | Manually add a relation triple. |
+
+### Episodic Memory — Conversations
+
+| Tool | Description |
+|------|-------------|
+| `episode_save` | Save conversation summary, decisions, mood, topics. |
+| `episode_recall` | Search past conversations by topic or get recent N. |
+
+### Intelligence
+
+| Tool | Description |
+|------|-------------|
+| `memory_reflect` | Analyze behavioral patterns: topic trends, time distribution, mood shifts, forgetting candidates. |
+| `archival_deduplicate` | Find and remove near-duplicates via embedding cosine similarity. |
+| `memory_consolidate` | Extract structured facts from text. Sentence-level splitting (Chinese + English), entity inference, dedup. |
+
+### Backup & Admin
+
+| Tool | Description |
+|------|-------------|
+| `memory_export` | Full snapshot: core + archival + embeddings → JSON file. |
+| `memory_import` | Restore from snapshot. Merge or replace mode. |
+| `memory_migrate` | Migrate from JSONL to SQLite with FTS5 full-text search. |
+| `memory_dashboard` | Generate self-contained HTML dashboard. |
+
+---
+
+## Search Scoring
+
+`archival_search` combines five signals:
+
+| Signal | Weight | Description |
+|--------|--------|-------------|
 | Keyword | 2× per term | Term presence in content + entity + tags |
 | Semantic | 5× | Cosine similarity via OpenAI `text-embedding-3-small` (512d) |
 | Recency | 0–1 | Linear decay over 1 year |
 | Access | 0–0.5 | Boost for recently accessed records |
+| Importance | 0.5× | Weighted by forgetting curve: `importance × e^(-0.01 × days)` |
 
-Embeddings are computed on insert and cached in `archival.embeddings.json`. If no OpenAI key is available, search falls back to keyword-only — no errors, just lower quality.
-
-**Cost:** ~$0.02 per 1M tokens with `text-embedding-3-small`. A typical session with 10 inserts + 5 searches costs < $0.001.
+Falls back to keyword-only if no OpenAI key is configured. Cost with embeddings: ~$0.001/session.
 
 ---
 
 ## Configuration
 
 ```json
-// openclaw.json
 {
   "plugins": {
     "allow": ["memory-engine"],
@@ -144,8 +154,8 @@ Embeddings are computed on insert and cached in `archival.embeddings.json`. If n
       "memory-engine": {
         "enabled": true,
         "config": {
-          "workspace": "/path/to/workspace",
-          "coreSizeLimit": 3072
+          "coreSizeLimit": 3072,
+          "sharing": false
         }
       }
     }
@@ -155,49 +165,23 @@ Embeddings are computed on insert and cached in `archival.embeddings.json`. If n
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `workspace` | Auto-resolved | Workspace directory path |
-| `coreSizeLimit` | `3072` (3KB) | Max bytes for core.json |
+| `workspace` | Auto-resolved | Override workspace directory |
+| `coreSizeLimit` | `3072` (3KB) | Max core.json size |
+| `sharing` | `true` | Cross-agent memory sharing. Set `false` for multi-user privacy. |
 
-**Requires:** `OPENAI_API_KEY` in environment for semantic search. Without it, keyword search still works.
-
----
-
-## Agent Instructions
-
-Add to your `AGENTS.md` or system prompt (done automatically by `setup.sh`):
-
-```markdown
-## Every Session
-1. Call `core_memory_read` — load your identity
-2. When you learn something important → `archival_insert`
-3. When you need details → `archival_search` before guessing
-4. When facts change → `core_memory_replace`
-5. End of conversation → `memory_consolidate` with key points
-```
+Semantic search requires `OPENAI_API_KEY` in environment (optional).
 
 ---
 
-## Daily Maintenance
+## Automated Maintenance
 
-`extras/memory-maintenance.sh` runs daily at 3am (installed as a LaunchAgent by `setup.sh`):
-
-- Checks core.json size (warns >4KB, critical >5KB)
-- Merges 7-day-old daily logs into weekly summaries
-- Archives 60-day-old weekly summaries
-- Alerts written to `memory/maintenance-alerts.json`
-
----
-
-## Backup & Migration
-
-```bash
-# Export
-openclaw agent -m "memory_export"
-# → memory/export-2026-04-01.json
-
-# Import on new machine
-openclaw agent -m "memory_import input_path='path/to/export.json' mode='replace'"
-```
+| Schedule | Job | What it does |
+|----------|-----|-------------|
+| Daily 9:00am | Reflection | Analyze memory patterns, store observations |
+| Every 6h | Consolidation | Extract missed facts from daily logs |
+| Weekly Sunday | Deduplication | Clean near-duplicate records |
+| Daily 9:30am | Dashboard | Refresh browsable HTML report |
+| Daily 3:00am | File cleanup | Merge old logs into weekly summaries, archive old summaries |
 
 ---
 
@@ -205,50 +189,41 @@ openclaw agent -m "memory_import input_path='path/to/export.json' mode='replace'
 
 ```
 memory-engine/
-├── index.js              # Plugin entry — tool registration only (250 lines)
+├── index.js                # Plugin entry — 19 tools (factory pattern)
 ├── lib/
-│   ├── paths.js          # Constants + path resolution
-│   ├── core.js           # Core memory CRUD + dot-path + auto-parse
-│   ├── archival.js       # Archival JSONL CRUD + in-memory cache
-│   ├── embedding.js      # OpenAI embedding API + file cache
-│   ├── search.js         # Hybrid four-signal search
-│   ├── consolidate.js    # Text → structured facts extraction
-│   ├── dedup.js          # Embedding similarity dedup
-│   └── backup.js         # Export/import
+│   ├── paths.js            # Constants, workspace resolution
+│   ├── core.js             # Core memory CRUD + auto-parse
+│   ├── archival.js         # JSONL storage + in-memory cache
+│   ├── embedding.js        # OpenAI embedding API + cache
+│   ├── search.js           # Hybrid 5-signal search
+│   ├── graph.js            # Knowledge graph: triples + traversal
+│   ├── episodes.js         # Episodic memory: save + recall
+│   ├── reflection.js       # Statistical pattern analysis
+│   ├── consolidate.js      # Text → facts extraction
+│   ├── dedup.js            # Embedding similarity dedup
+│   ├── backup.js           # Export / import
+│   ├── store-sqlite.js     # SQLite backend (FTS5)
+│   └── dashboard.js        # HTML dashboard generator
 ├── extras/
-│   └── memory-maintenance.sh
-├── setup.sh              # One-command install
-├── .claude/CLAUDE.md     # Dev guide for Claude Code
-├── package.json
+│   ├── memory-maintenance.sh
+│   └── auto-consolidation-crons.json
+├── setup.sh                # One-command install
+├── .claude/CLAUDE.md       # Dev guide
+├── ROADMAP.md
 ├── openclaw.plugin.json
-└── README.md
+└── package.json
 ```
 
----
+## Platforms
 
-## Roadmap
-
-- [x] Core memory with size guard and auto-parse
-- [x] Archival CRUD with in-memory index
-- [x] Hybrid search (keyword + embedding + recency + access decay)
-- [x] Auto-extract facts from text
-- [x] Embedding-based deduplication
-- [x] Full backup/restore
-- [x] Modular codebase (8 focused modules)
-- [ ] LanceDB / SQLite backend for 50K+ records
-- [ ] Cross-agent memory sharing
-- [ ] Scheduled auto-consolidation via OpenClaw cron
-- [ ] Memory importance scoring (agent rates memories 1-10)
-- [ ] Forgetting curve — auto-archive unaccessed memories after N days
-- [ ] ClawHub publishing
-- [ ] Web dashboard for memory browsing
+| Platform | Scheduler | Status |
+|----------|----------|--------|
+| macOS | LaunchAgent | Full support |
+| Linux | systemd timer | Full support |
+| Windows | schtasks | Guided setup |
 
 ---
 
 ## License
 
-MIT
-
----
-
-Built for [OpenClaw](https://openclaw.ai). Inspired by [MemGPT/Letta](https://github.com/cpacker/MemGPT).
+MIT — Built for [OpenClaw](https://openclaw.ai). Inspired by [MemGPT/Letta](https://github.com/cpacker/MemGPT).
