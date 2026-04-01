@@ -1,0 +1,37 @@
+{
+  "name": "@icex-labs/openclaw-memory-engine",
+  "version": "1.0.0",
+  "description": "MemGPT-style hierarchical memory plugin for OpenClaw — core memory block + archival storage with semantic search",
+  "type": "module",
+  "main": "index.js",
+  "openclaw": {
+    "extensions": ["./index.js"]
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "memory",
+    "memgpt",
+    "letta",
+    "archival",
+    "ai-memory"
+  ],
+  "author": "George Guo <george@netralis.ca>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/icex-labs/openclaw-memory-engine.git"
+  },
+  "homepage": "https://github.com/icex-labs/openclaw-memory-engine#readme",
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.3.0"
+  },
+  "files": [
+    "index.js",
+    "openclaw.plugin.json",
+    "README.md"
+  ]
+}
