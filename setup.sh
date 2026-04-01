@@ -7,14 +7,20 @@
 
 set -euo pipefail
 
-WORKSPACE="${1:-${OPENCLAW_WORKSPACE:-$HOME/.openclaw/workspace}}"
+NON_INTERACTIVE=false
+WS_ARG=""
+for arg in "$@"; do
+  case "$arg" in
+    --non-interactive) NON_INTERACTIVE=true ;;
+    *) [ -z "$WS_ARG" ] && WS_ARG="$arg" ;;
+  esac
+done
+WORKSPACE="${WS_ARG:-${OPENCLAW_WORKSPACE:-$HOME/.openclaw/workspace}}"
 OPENCLAW_DIR="${OPENCLAW_DIR:-$HOME/.openclaw}"
 CONFIG="$OPENCLAW_DIR/openclaw.json"
 MEMORY_DIR="$WORKSPACE/memory"
 AGENTS_MD="$WORKSPACE/AGENTS.md"
 PLUGIN_DIR="$(cd "$(dirname "$0")" && pwd)"
-NON_INTERACTIVE=false
-[[ "${2:-}" == "--non-interactive" || "${1:-}" == "--non-interactive" ]] && NON_INTERACTIVE=true
 OS="$(uname -s)"
 
 echo "🧠 openclaw-memory-engine setup"
