@@ -50,15 +50,33 @@ function text(msg) {
   return { content: [{ type: "text", text: msg }] };
 }
 
-/** Resolve workspace, accepting optional agent param for multi-agent setups. */
-function ws(ctx, params) {
-  return resolveWorkspace(ctx, params?.agent);
+/**
+ * Extract agentId from session key.
+ * Session key format: "agent:<agentId>:..." (e.g., "agent:wife:discord:channel:123")
+ */
+function extractAgentId(sessionKey) {
+  if (!sessionKey) return null;
+  const parts = sessionKey.split(":");
+  // Format: agent:<agentId>:...
+  if (parts[0] === "agent" && parts.length >= 2) return parts[1];
+  return null;
 }
 
-/** Common agent parameter for all tools (optional). */
-const AGENT_PARAM = {
-  agent: { type: "string", description: "Agent ID for multi-agent setups (e.g., 'wife'). Omit for default agent." },
-};
+/** Resolve workspace for the current tool invocation. */
+function ws(factoryAgentId, params) {
+  return resolveWorkspace({ agentId: factoryAgentId }, params?.agent);
+}
+
+/**
+ * Wrap a tool definition into a factory that binds agentId from session context.
+ * Usage: api.registerTool(withAgent((agentId) => ({ name: ..., execute: ... })))
+ */
+function withAgent(toolFn) {
+  return (factoryCtx) => {
+    const agentId = factoryCtx?.agentId || extractAgentId(factoryCtx?.sessionKey) || factoryCtx?.workspaceDir || null;
+    return toolFn(agentId);
+  };
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Plugin entry
@@ -71,19 +89,25 @@ export default definePluginEntry({
     "MemGPT-style hierarchical memory: core block, archival storage, hybrid search, dedup, consolidate, backup/restore",
 
   register(api) {
+    // ═══════════════════════════════════════════════════════════════════
+    // All tools use factory pattern to extract agentId from ctx.sessionKey.
+    // This enables per-agent workspace resolution for multi-workspace setups.
+    // Factory ctx has: { sessionKey, workspaceDir, agentId, ... }
+    // ═══════════════════════════════════════════════════════════════════
+
     // ─── core_memory_read ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "core_memory_read",
       description:
         "Read the entire core memory block. Contains user identity, relationship, preferences, and current focus. Call at session start.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
-      async execute(_id, _params, ctx) {
-        return text(JSON.stringify(readCore(ws(ctx, _params)), null, 2));
+      async execute(_id, _params) {
+        return text(JSON.stringify(readCore(ws(agentId, _params)), null, 2));
       },
-    });
+    })));
 
     // ─── core_memory_replace ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "core_memory_replace",
       description:
         "Atomically update a field in core memory using dot-path notation (e.g., 'user.location', 'current_focus'). Value is auto-parsed if it looks like JSON. Core memory must stay small (<3KB).",
@@ -96,9 +120,9 @@ export default definePluginEntry({
         required: ["key", "value"],
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
-        const limit = getCoreSizeLimit(ctx);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
+        const limit = getCoreSizeLimit(null);
         const core = readCore(wsp);
         const value = autoParse(params.value);
         const old = dotSet(core, params.key, value);
@@ -110,10 +134,10 @@ export default definePluginEntry({
         writeCore(wsp, core);
         return text(`OK: ['${params.key}'] updated. Old: ${JSON.stringify(old)} → New: ${JSON.stringify(value)}`);
       },
-    });
+    })));
 
     // ─── core_memory_append ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "core_memory_append",
       description:
         "Append an item to an array field in core memory (e.g., current_focus). Creates the array if needed.",
@@ -126,9 +150,9 @@ export default definePluginEntry({
         required: ["key", "item"],
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
-        const limit = getCoreSizeLimit(ctx);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
+        const limit = getCoreSizeLimit(null);
         const core = readCore(wsp);
         let arr = dotGet(core, params.key);
         if (!Array.isArray(arr)) {
@@ -144,10 +168,10 @@ export default definePluginEntry({
         writeCore(wsp, core);
         return text(`OK: Appended "${params.item}" to ${params.key} (now ${arr.length} items)`);
       },
-    });
+    })));
 
     // ─── archival_insert ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "archival_insert",
       description:
         "Store a memory/fact in archival storage. Tags with entity and tags. Auto-extracts knowledge graph triples. Set importance (1-10, default 5) to influence search ranking and forgetting.",
@@ -162,8 +186,8 @@ export default definePluginEntry({
         required: ["content"],
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         const imp = Math.min(10, Math.max(1, params.importance ?? 5));
         const record = appendRecord(wsp, {
           content: params.content,
@@ -187,10 +211,10 @@ export default definePluginEntry({
         }
         return text(msg);
       },
-    });
+    })));
 
     // ─── archival_search ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "archival_search",
       description:
         "Hybrid search over archival memory: keyword + semantic similarity + recency + access decay. Use before answering factual questions.",
@@ -203,17 +227,17 @@ export default definePluginEntry({
         required: ["query"],
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         const topK = Math.min(params.top_k || DEFAULT_TOP_K, MAX_TOP_K);
         const results = await hybridSearch(wsp, params.query, topK);
         if (results.length === 0) return text(`No archival memories found for: "${params.query}"`);
         return text(`Found ${results.length} results:\n${formatResults(results)}`);
       },
-    });
+    })));
 
     // ─── archival_update ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "archival_update",
       description:
         "Update an existing archival record by ID. Use to correct wrong facts.",
@@ -228,8 +252,8 @@ export default definePluginEntry({
         required: ["id", "content"],
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         const records = loadArchival(wsp);
         const idx = records.findIndex((r) => r.id === params.id);
         if (idx === -1) return text(`ERROR: Record ${params.id} not found.`);
@@ -245,10 +269,10 @@ export default definePluginEntry({
         indexEmbedding(wsp, records[idx]).catch(() => {});
         return text(`OK: Updated ${params.id}. Old: "${old.slice(0, 60)}..." → New: "${params.content.slice(0, 60)}..."`);
       },
-    });
+    })));
 
     // ─── archival_delete ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "archival_delete",
       description: "Delete an archival record by ID.",
       parameters: {
@@ -257,8 +281,8 @@ export default definePluginEntry({
         required: ["id"],
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         const records = loadArchival(wsp);
         const idx = records.findIndex((r) => r.id === params.id);
         if (idx === -1) return text(`ERROR: Record ${params.id} not found.`);
@@ -269,15 +293,15 @@ export default definePluginEntry({
         saveEmbeddingCache(wsp);
         return text(`OK: Deleted ${params.id}. Was: "${removed.content.slice(0, 80)}..."`);
       },
-    });
+    })));
 
     // ─── archival_stats ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "archival_stats",
       description: "Show archival memory statistics.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         const records = loadArchival(wsp);
         const embCache = loadEmbeddingCache(wsp);
         const entityCounts = {};
@@ -302,10 +326,10 @@ export default definePluginEntry({
           `\nTop tags:\n${topT || "  (none)"}`,
         ].join("\n"));
       },
-    });
+    })));
 
     // ─── archival_deduplicate ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "archival_deduplicate",
       description:
         "Scan for near-duplicate records using embedding similarity. Preview by default; pass apply=true to remove.",
@@ -316,8 +340,8 @@ export default definePluginEntry({
         },
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         const dupes = await findDuplicates(wsp);
         if (dupes.length === 0) return text("No duplicates found. Archival memory is clean.");
         const preview = dupes
@@ -329,10 +353,10 @@ export default definePluginEntry({
         }
         return text(`Found ${dupes.length} potential duplicates (preview, call with apply=true to remove):\n\n${preview}`);
       },
-    });
+    })));
 
     // ─── memory_consolidate ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "memory_consolidate",
       description:
         "Extract structured facts from text (conversation summary, daily log). Splits by sentence, infers entity, deduplicates against existing archival.",
@@ -346,8 +370,8 @@ export default definePluginEntry({
         required: ["text"],
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         const result = await consolidateText(
           ws, params.text, params.default_entity || "", params.default_tags || [],
         );
@@ -359,10 +383,10 @@ export default definePluginEntry({
         if (result.skipped.length > 0) lines.push(`Skipped: ${result.skipped.map((s) => `"${s}..."`).join(", ")}`);
         return text(lines.join("\n"));
       },
-    });
+    })));
 
     // ─── graph_query ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "graph_query",
       description:
         "Query the knowledge graph from a starting entity. Returns connected nodes via relations. Use to answer relational questions like 'who is George's doctor' or 'what treats his condition'.",
@@ -376,8 +400,8 @@ export default definePluginEntry({
         required: ["entity"],
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         const depth = Math.min(params.depth || 2, 4);
         const results = queryGraph(wsp, params.entity, params.relation || null, depth);
         if (results.length === 0) {
@@ -388,10 +412,10 @@ export default definePluginEntry({
         ).join("\n");
         return text(`Found ${results.length} connections from "${params.entity}":\n${fmt}`);
       },
-    });
+    })));
 
     // ─── graph_add ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "graph_add",
       description:
         "Manually add a relation to the knowledge graph. Use when auto-extraction missed a relation, or to add relations you inferred from conversation.",
@@ -405,18 +429,18 @@ export default definePluginEntry({
         required: ["subject", "relation", "object"],
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         const triple = addTriple(wsp, params.subject, params.relation, params.object);
         if (!triple) {
           return text(`Relation already exists: (${params.subject} --${params.relation}--> ${params.object})`);
         }
         return text(`OK: Added ${triple.id}: (${params.subject} --${params.relation}--> ${params.object})`);
       },
-    });
+    })));
 
     // ─── episode_save ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "episode_save",
       description:
         "Save a conversation episode (summary of what was discussed, decisions made, mood). Call at end of meaningful conversations. Enables 'what did we discuss last time about X?' queries.",
@@ -432,8 +456,8 @@ export default definePluginEntry({
         required: ["summary"],
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         const ep = saveEpisode(wsp, {
           summary: params.summary,
           decisions: params.decisions || [],
@@ -444,10 +468,10 @@ export default definePluginEntry({
         indexEpisodeEmbedding(wsp, ep).catch(() => {});
         return text(`OK: Episode saved ${ep.id}. "${ep.summary.slice(0, 100)}..."\n  Decisions: ${ep.decisions.length}, Topics: ${ep.topics.join(", ") || "(none)"}, Mood: ${ep.mood || "(none)"}`);
       },
-    });
+    })));
 
     // ─── episode_recall ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "episode_recall",
       description:
         "Search past conversation episodes by topic/keyword, or get the most recent N episodes. Use to recall 'what did we discuss about X last time'.",
@@ -459,8 +483,8 @@ export default definePluginEntry({
         },
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         const lastN = params.last_n || 5;
         const results = await recallEpisodes(wsp, params.query || null, lastN);
         if (results.length === 0) {
@@ -473,10 +497,10 @@ export default definePluginEntry({
         }).join("\n\n");
         return text(`${results.length} episode(s):\n\n${fmt}`);
       },
-    });
+    })));
 
     // ─── memory_reflect ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "memory_reflect",
       description: [
         "Analyze recent memory for behavioral patterns, topic trends, mood shifts, and memory health.",
@@ -492,17 +516,17 @@ export default definePluginEntry({
         },
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         const window = Math.min(params.window_days || 7, 30);
         const analysis = analyzePatterns(wsp, window);
         const report = formatReflection(analysis);
         return text(report);
       },
-    });
+    })));
 
     // ─── memory_export ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "memory_export",
       description:
         "Export entire memory (core + archival + embeddings) to a JSON file for backup or migration.",
@@ -513,16 +537,16 @@ export default definePluginEntry({
         },
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         const { path, stats } = exportMemory(wsp, params.output_path);
         const sizeKB = (readFileSync(path).length / 1024).toFixed(1);
         return text(`OK: Exported to ${path} (${sizeKB}KB)\n  Core: ${stats.core_size}B\n  Archival: ${stats.archival_count} records\n  Embeddings: ${stats.embedding_count}`);
       },
-    });
+    })));
 
     // ─── memory_import ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "memory_import",
       description:
         "Import a memory export file. Modes: 'replace' (overwrite all) or 'merge' (add missing). Default: merge.",
@@ -535,8 +559,8 @@ export default definePluginEntry({
         required: ["input_path"],
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         try {
           const result = importMemory(wsp, params.input_path, params.mode || "merge");
           return text(`OK: ${result}`);
@@ -544,10 +568,10 @@ export default definePluginEntry({
           return text(`ERROR: ${e.message}`);
         }
       },
-    });
+    })));
 
     // ─── memory_migrate ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "memory_migrate",
       description:
         "Migrate memory from JSONL files to SQLite database. SQLite provides FTS5 full-text search and scales to 50K+ records. JSONL files are preserved as backup.",
@@ -556,8 +580,8 @@ export default definePluginEntry({
         properties: {},
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         try {
           const result = migrateFromJsonl(wsp);
           return text([
@@ -574,10 +598,10 @@ export default definePluginEntry({
           return text(`ERROR: Migration failed: ${e.message}`);
         }
       },
-    });
+    })));
 
     // ─── memory_dashboard ───
-    api.registerTool({
+    api.registerTool(withAgent((agentId) => ({
       name: "memory_dashboard",
       description:
         "Generate a self-contained HTML dashboard for browsing memory: facts, graph, episodes, reflection, and search. Opens in any browser.",
@@ -588,8 +612,8 @@ export default definePluginEntry({
         },
         additionalProperties: false,
       },
-      async execute(_id, params, ctx) {
-        const wsp = ws(ctx, params);
+      async execute(_id, params) {
+        const wsp = ws(agentId, params);
         try {
           const outPath = generateDashboard(wsp, params.output_path);
           return text(`OK: Dashboard generated at ${outPath}\nOpen in browser: file://${outPath}`);
@@ -597,6 +621,6 @@ export default definePluginEntry({
           return text(`ERROR: Dashboard generation failed: ${e.message}`);
         }
       },
-    });
+    })));
   },
 });
