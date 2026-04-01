@@ -3,7 +3,7 @@
  *
  * MemGPT-style hierarchical memory plugin for OpenClaw.
  *
- * Tools (17):
+ * Tools (19):
  *   Core:        core_memory_read, core_memory_replace, core_memory_append
  *   Archival:    archival_insert, archival_search, archival_update, archival_delete, archival_stats
  *   Graph:       graph_query, graph_add
@@ -11,6 +11,7 @@
  *   Reflection:  memory_reflect
  *   Maintenance: archival_deduplicate, memory_consolidate
  *   Backup:      memory_export, memory_import
+ *   Admin:       memory_migrate, memory_dashboard
  */
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
@@ -27,6 +28,8 @@ import { exportMemory, importMemory } from "./lib/backup.js";
 import { queryGraph, addTriple, extractTriples } from "./lib/graph.js";
 import { saveEpisode, recallEpisodes, indexEpisodeEmbedding } from "./lib/episodes.js";
 import { analyzePatterns, formatReflection } from "./lib/reflection.js";
+import { migrateFromJsonl } from "./lib/store-sqlite.js";
+import { generateDashboard } from "./lib/dashboard.js";
 
 import { readFileSync } from "node:fs";
 
@@ -529,6 +532,59 @@ export default definePluginEntry({
           return text(`OK: ${result}`);
         } catch (e) {
           return text(`ERROR: ${e.message}`);
+        }
+      },
+    });
+
+    // ─── memory_migrate ───
+    api.registerTool({
+      name: "memory_migrate",
+      description:
+        "Migrate memory from JSONL files to SQLite database. SQLite provides FTS5 full-text search and scales to 50K+ records. JSONL files are preserved as backup.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+      async execute(_id, _params, ctx) {
+        const ws = resolveWorkspace(ctx);
+        try {
+          const result = migrateFromJsonl(ws);
+          return text([
+            `OK: Migration complete.`,
+            `  Archival: ${result.archival} records`,
+            `  Graph: ${result.graph} triples`,
+            `  Episodes: ${result.episodes} episodes`,
+            `  Embeddings: ${result.embeddings} vectors`,
+            ``,
+            `SQLite database: memory/memory.sqlite`,
+            `JSONL files preserved as backup.`,
+          ].join("\n"));
+        } catch (e) {
+          return text(`ERROR: Migration failed: ${e.message}`);
+        }
+      },
+    });
+
+    // ─── memory_dashboard ───
+    api.registerTool({
+      name: "memory_dashboard",
+      description:
+        "Generate a self-contained HTML dashboard for browsing memory: facts, graph, episodes, reflection, and search. Opens in any browser.",
+      parameters: {
+        type: "object",
+        properties: {
+          output_path: { type: "string", description: "Output HTML file path (default: memory/dashboard.html)" },
+        },
+        additionalProperties: false,
+      },
+      async execute(_id, params, ctx) {
+        const ws = resolveWorkspace(ctx);
+        try {
+          const outPath = generateDashboard(ws, params.output_path);
+          return text(`OK: Dashboard generated at ${outPath}\nOpen in browser: file://${outPath}`);
+        } catch (e) {
+          return text(`ERROR: Dashboard generation failed: ${e.message}`);
         }
       },
     });

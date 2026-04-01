@@ -1,13 +1,21 @@
 {
   "id": "memory-engine",
   "name": "Memory Engine",
-  "description": "MemGPT-style hierarchical memory: core memory block + archival storage with semantic search",
+  "description": "MemGPT-style hierarchical memory: core memory block + archival storage with semantic search, knowledge graph, episodic memory, and dashboard",
   "configSchema": {
     "type": "object",
     "properties": {
       "workspace": {
         "type": "string",
         "description": "Path to workspace directory"
+      },
+      "coreSizeLimit": {
+        "type": "number",
+        "description": "Max bytes for core.json (default: 3072)"
+      },
+      "sharing": {
+        "type": "boolean",
+        "description": "Enable cross-agent memory sharing (default: true). Set false for privacy-sensitive multi-user setups."
       }
     },
     "additionalProperties": false
