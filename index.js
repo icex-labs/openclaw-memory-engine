@@ -702,7 +702,7 @@ export default definePluginEntry({
       async execute(_id, params) {
         const wsp = ws(agentId, params);
         try {
-          const result = runQualityPass(wsp, {
+          const result = await runQualityPass(wsp, {
             skipGraph: params.skip_graph || false,
             skipEpisodes: params.skip_episodes || false,
           });

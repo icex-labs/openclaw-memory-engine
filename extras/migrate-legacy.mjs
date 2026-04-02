@@ -140,9 +140,26 @@ for (const { path, tag } of files) {
       continue;
     }
 
+    // Infer date from filename (e.g., 2026-03-28.md → 2026-03-28, 2026-W13.md → week date)
+    const dateMatch = basename(path).match(/^(\d{4}-\d{2}-\d{2})/);
+    const weekMatch = basename(path).match(/^(\d{4})-W(\d{2})/);
+    let inferredTs;
+    if (dateMatch) {
+      inferredTs = dateMatch[1] + "T12:00:00Z";
+    } else if (weekMatch) {
+      // Approximate: week number × 7 days from Jan 1
+      const year = parseInt(weekMatch[1]);
+      const week = parseInt(weekMatch[2]);
+      const jan1 = new Date(year, 0, 1);
+      const weekDate = new Date(jan1.getTime() + (week - 1) * 7 * 86400000);
+      inferredTs = weekDate.toISOString();
+    } else {
+      inferredTs = new Date().toISOString();
+    }
+
     const record = {
       id: `arch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      ts: new Date().toISOString(),
+      ts: inferredTs,
       last_accessed: null,
       access_count: 0,
       importance: 5,
