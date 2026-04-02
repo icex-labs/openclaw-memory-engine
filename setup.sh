@@ -283,41 +283,25 @@ if [ -f "$AGENTS_MD" ]; then
   if ! grep -q "core_memory_read" "$AGENTS_MD"; then
     cat >> "$AGENTS_MD" <<'PATCH'
 
-## Memory System — MemGPT Architecture
+## Memory System (memory-engine plugin v4.2)
 
-You have 19 memory tools. **Use them actively.**
+**Memory is automatic.** All conversations are captured by hooks — you don't need to manually save anything.
 
-### Core Memory (`core_memory_read` / `core_memory_replace` / `core_memory_append`)
-- Call `core_memory_read` at **every session start**
-- `core_memory_replace` when facts change
-- `current_focus` max 5 items — update frequently
-- Hard limit: 3KB — move details to archival
+### What NOT to do
+- **Don't say "I'll remember that" or "recorded"** — memory happens silently
+- **Don't call `archival_insert` for conversation content** — hooks already capture it
+- Just be natural. Like a person who actually remembers things.
 
-### Archival Memory (`archival_insert` / `archival_search` / `archival_update` / `archival_delete`)
-- `archival_insert`: store facts with entity + tags + importance (1-10)
-- `archival_search`: hybrid keyword + semantic search. Use before guessing.
-- `archival_update`/`archival_delete`: correct or remove outdated facts
-
-### Knowledge Graph (`graph_query` / `graph_add`)
-- Auto-extracted from archival_insert (relations like has_doctor, owns, lives_in)
-- `graph_query`: traverse from entity to find connections
-- `graph_add`: manually add relations
-
-### Episodic Memory (`episode_save` / `episode_recall`)
-- `episode_save`: at end of meaningful conversations (summary, decisions, mood, topics)
-- `episode_recall`: "what did we discuss about X last time?"
-
-### Maintenance
-- `memory_reflect`: analyze patterns (use during heartbeats)
-- `archival_deduplicate`: clean near-duplicate facts
-- `memory_consolidate`: extract facts from text blocks
-- `memory_dashboard`: generate browsable HTML dashboard
-
-### Memory Discipline
-- If it matters → `archival_insert` it. "Mental notes" don't survive restarts.
-- Don't guess → `archival_search` first.
-- End of conversation → `episode_save`.
-- Update core memory proactively.
+### When to use tools manually
+- `core_memory_read` — call at **every session start** to load your identity
+- `core_memory_replace` / `core_memory_append` — when identity facts change
+- `archival_search` — **before answering factual questions** (don't guess)
+- `archival_insert` — only for non-conversation sources (web_fetch results, file contents)
+- `archival_update` / `archival_delete` — correct or remove wrong facts
+- `graph_query` — answer relational questions ("who is my doctor?")
+- `episode_save` — at end of meaningful conversations (summary, decisions, mood)
+- `episode_recall` — "what did we discuss about X last time?"
+- `memory_reflect` — during heartbeats to analyze patterns
 PATCH
     echo "✅ AGENTS.md patched with memory instructions"
   else
