@@ -147,16 +147,8 @@ export default definePluginEntry({
       } catch { /* don't break message flow */ }
     }, { name: "memory-engine-capture-received", description: "Auto-capture facts from incoming messages" });
 
-    api.registerHook("message:sent", (event) => {
-      try {
-        const ctx = event.context;
-        if (!ctx?.content || !ctx?.success) return;
-        if (ctx.content.length < 50) return;
-        const agentId = extractAgentId(event.sessionKey);
-        const wsDir = resolveWorkspace({ agentId });
-        captureMessage(wsDir, ctx.content, "agent-reply");
-      } catch { /* don't break message flow */ }
-    }, { name: "memory-engine-capture-sent", description: "Auto-capture facts from agent replies" });
+    // message:sent hook removed — agent replies are restatements, not new facts.
+    // Only user messages (message:received) are auto-captured.
 
     // ─── core_memory_read ───
     api.registerTool(withAgent((agentId) => ({
