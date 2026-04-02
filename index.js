@@ -138,28 +138,25 @@ export default definePluginEntry({
     // ═══════════════════════════════════════════════════════════════════
 
     api.registerHook("message:received", (event) => {
-      const ctx = event.context;
-      if (!ctx?.content) return;
-
-      // Resolve workspace from session key
-      const agentId = extractAgentId(event.sessionKey);
-      const wsDir = resolveWorkspace({ agentId });
-
-      captureMessage(wsDir, ctx.content, "user-message");
-    });
+      try {
+        const ctx = event.context;
+        if (!ctx?.content) return;
+        const agentId = extractAgentId(event.sessionKey);
+        const wsDir = resolveWorkspace({ agentId });
+        captureMessage(wsDir, ctx.content, "user-message");
+      } catch { /* don't break message flow */ }
+    }, { name: "memory-engine-capture-received", description: "Auto-capture facts from incoming messages" });
 
     api.registerHook("message:sent", (event) => {
-      const ctx = event.context;
-      if (!ctx?.content || !ctx?.success) return;
-
-      // Only capture agent replies, not system messages
-      if (ctx.content.length < 50) return;
-
-      const agentId = extractAgentId(event.sessionKey);
-      const wsDir = resolveWorkspace({ agentId });
-
-      captureMessage(wsDir, ctx.content, "agent-reply");
-    });
+      try {
+        const ctx = event.context;
+        if (!ctx?.content || !ctx?.success) return;
+        if (ctx.content.length < 50) return;
+        const agentId = extractAgentId(event.sessionKey);
+        const wsDir = resolveWorkspace({ agentId });
+        captureMessage(wsDir, ctx.content, "agent-reply");
+      } catch { /* don't break message flow */ }
+    }, { name: "memory-engine-capture-sent", description: "Auto-capture facts from agent replies" });
 
     // ─── core_memory_read ───
     api.registerTool(withAgent((agentId) => ({
