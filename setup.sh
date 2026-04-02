@@ -117,11 +117,14 @@ if command -v node &>/dev/null && [ -f "$PLUGIN_DIR/extras/migrate-legacy.mjs" ]
   # Check if there are legacy files to migrate
   legacy_count=0
   [ -f "$WORKSPACE/MEMORY.md" ] && legacy_count=$((legacy_count + 1))
-  legacy_count=$((legacy_count + $(ls "$MEMORY_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ')))
-  legacy_count=$((legacy_count + $(ls "$MEMORY_DIR"/weekly/*.md 2>/dev/null | wc -l | tr -d ' ')))
-  legacy_count=$((legacy_count + $(ls "$MEMORY_DIR"/topics/*.md 2>/dev/null | wc -l | tr -d ' ')))
+  md_count=$(find "$MEMORY_DIR" -maxdepth 1 -name "*.md" 2>/dev/null | wc -l | tr -d ' ' || true)
+  weekly_count=$(find "$MEMORY_DIR/weekly" -name "*.md" 2>/dev/null | wc -l | tr -d ' ' || true)
+  topics_count=$(find "$MEMORY_DIR/topics" -name "*.md" 2>/dev/null | wc -l | tr -d ' ' || true)
+  : "${md_count:=0}" "${weekly_count:=0}" "${topics_count:=0}"
+  legacy_count=$((legacy_count + md_count + weekly_count + topics_count))
 
-  archival_count=$(wc -l < "$MEMORY_DIR/archival.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+  archival_count=0
+  [ -f "$MEMORY_DIR/archival.jsonl" ] && archival_count=$(wc -l < "$MEMORY_DIR/archival.jsonl" | tr -d ' ')
 
   if [ "$legacy_count" -gt 0 ] && [ "$archival_count" -lt 10 ]; then
     echo ""
@@ -150,11 +153,12 @@ fi
 SCRIPTS_DIR="$WORKSPACE/scripts"
 mkdir -p "$SCRIPTS_DIR"
 if [ ! -f "$SCRIPTS_DIR/memory-maintenance.sh" ]; then
-  cp "$PLUGIN_DIR/extras/memory-maintenance.sh" "$SCRIPTS_DIR/memory-maintenance.sh" 2>/dev/null || {
+  if cp "$PLUGIN_DIR/extras/memory-maintenance.sh" "$SCRIPTS_DIR/memory-maintenance.sh" 2>/dev/null; then
+    chmod +x "$SCRIPTS_DIR/memory-maintenance.sh" 2>/dev/null || true
+    echo "✅ memory-maintenance.sh installed"
+  else
     echo "⚠️  memory-maintenance.sh not found in extras/. Copy manually."
-  }
-  chmod +x "$SCRIPTS_DIR/memory-maintenance.sh" 2>/dev/null
-  echo "✅ memory-maintenance.sh installed"
+  fi
 else
   echo "⏭️  memory-maintenance.sh already exists"
 fi
@@ -433,12 +437,17 @@ echo "  2. Restart gateway: openclaw gateway restart"
 echo "  3. Test: openclaw agent -m 'core_memory_read'"
 echo "  4. Dashboard: open $MEMORY_DIR/dashboard.html"
 echo ""
-echo "19 tools ready:"
+echo "20 tools + 2 hooks ready:"
+echo "  Hooks:    auto-capture incoming messages + agent replies (passive)"
 echo "  Core:     core_memory_read, core_memory_replace, core_memory_append"
 echo "  Archival: archival_insert/search/update/delete/stats"
 echo "  Graph:    graph_query, graph_add"
 echo "  Episodes: episode_save, episode_recall"
 echo "  Reflect:  memory_reflect"
+echo "  Quality:  memory_quality"
 echo "  Maint:    archival_deduplicate, memory_consolidate"
 echo "  Backup:   memory_export, memory_import"
 echo "  Admin:    memory_migrate, memory_dashboard"
+echo ""
+echo "Memory is automatic — hooks capture all conversations."
+echo "Your agent doesn't need to say 'I'll remember that.'"

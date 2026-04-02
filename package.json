@@ -1,6 +1,6 @@
 {
   "name": "@icex-labs/openclaw-memory-engine",
-  "version": "4.2.1",
+  "version": "4.2.2",
   "description": "MemGPT-style hierarchical memory plugin for OpenClaw — core memory block + archival storage with semantic search",
   "type": "module",
   "main": "index.js",
