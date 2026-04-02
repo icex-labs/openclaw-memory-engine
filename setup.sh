@@ -149,6 +149,25 @@ if command -v node &>/dev/null && [ -f "$PLUGIN_DIR/extras/migrate-legacy.mjs" ]
   fi
 fi
 
+# --- 3c. Upgrade: run v5.0 embedding classification if not done yet ---
+if [ -f "$MEMORY_DIR/archival.jsonl" ] && [ ! -f "$MEMORY_DIR/classifier-anchors.json" ]; then
+  archival_count=$(wc -l < "$MEMORY_DIR/archival.jsonl" | tr -d ' ')
+  if [ "$archival_count" -gt 0 ]; then
+    echo ""
+    echo "📊 Upgrade detected: running v5.0 embedding-based classification..."
+    echo "   This replaces keyword-based entity/importance with semantic classification."
+    if command -v openclaw &>/dev/null; then
+      # Use the agent to run memory_quality (needs gateway running)
+      openclaw agent --agent main -m "memory_quality" --timeout 120 2>&1 | tail -3 || {
+        echo "⚠️  Quality pass via agent failed (gateway may not be running)."
+        echo "   Run manually after restart: openclaw agent -m 'memory_quality'"
+      }
+    else
+      echo "⚠️  openclaw CLI not found. Run after install: openclaw agent -m 'memory_quality'"
+    fi
+  fi
+fi
+
 # --- 4. Install memory-maintenance.sh ---
 SCRIPTS_DIR="$WORKSPACE/scripts"
 mkdir -p "$SCRIPTS_DIR"
