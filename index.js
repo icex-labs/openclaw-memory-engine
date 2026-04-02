@@ -32,6 +32,7 @@ import { analyzePatterns, formatReflection } from "./lib/reflection.js";
 import { runQualityPass, formatQualityReport } from "./lib/quality.js";
 import { migrateFromJsonl } from "./lib/store-sqlite.js";
 import { generateDashboard } from "./lib/dashboard.js";
+import { captureMessage } from "./lib/auto-capture.js";
 
 import { readFileSync } from "node:fs";
 
@@ -130,6 +131,35 @@ export default definePluginEntry({
         }
       } catch { /* ignore startup errors */ }
     }, 10000); // delay 10s after gateway start
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Auto-capture hooks: passively store facts from conversations
+    // No reliance on agent calling tools — memory happens automatically
+    // ═══════════════════════════════════════════════════════════════════
+
+    api.registerHook("message:received", (event) => {
+      const ctx = event.context;
+      if (!ctx?.content) return;
+
+      // Resolve workspace from session key
+      const agentId = extractAgentId(event.sessionKey);
+      const wsDir = resolveWorkspace({ agentId });
+
+      captureMessage(wsDir, ctx.content, "user-message");
+    });
+
+    api.registerHook("message:sent", (event) => {
+      const ctx = event.context;
+      if (!ctx?.content || !ctx?.success) return;
+
+      // Only capture agent replies, not system messages
+      if (ctx.content.length < 50) return;
+
+      const agentId = extractAgentId(event.sessionKey);
+      const wsDir = resolveWorkspace({ agentId });
+
+      captureMessage(wsDir, ctx.content, "agent-reply");
+    });
 
     // ─── core_memory_read ───
     api.registerTool(withAgent((agentId) => ({
