@@ -210,6 +210,38 @@ Falls back to keyword-only without OpenAI key. Cost: ~$0.001/session.
 
 ---
 
+## Classification (v5.0)
+
+Entity and importance classification is **embedding-based** — no hardcoded keywords, works with any language.
+
+```
+With OPENAI_API_KEY (recommended):
+  15 entity anchors (health, finance, immigration, legal, vehicles, ...)
+  4 importance anchors (critical / high / medium / low)
+  Anchor embeddings computed once, cached to classifier-anchors.json
+  → Language-agnostic: Japanese, French, Korean, Chinese, English all work
+
+Without OPENAI_API_KEY (fallback):
+  Format-based heuristics:
+    $amounts → finance (importance 7)
+    URLs/code → technology
+    Dates → importance 6
+    Short messages → low importance
+    Long messages → high importance
+  → Basic but functional, no API cost
+```
+
+Real results on 2,751 records:
+
+| Metric | Before (regex v4) | After (embedding v5) |
+|--------|-------------------|---------------------|
+| "general" entities | 45% | **29%** |
+| flat importance=5 | 71% | **39%** |
+| Languages supported | English + Chinese | **any** |
+| Hardcoded keywords | 100+ | **zero** |
+
+---
+
 ## Self-Healing
 
 | Issue | Auto-fix |
@@ -217,8 +249,9 @@ Falls back to keyword-only without OpenAI key. Cost: ~$0.001/session.
 | Missing embeddings | Batch backfill on restart (all workspaces) |
 | Agent forgets to save | Hooks capture everything passively |
 | Duplicate facts | 60s dedup + keyword overlap + weekly cron |
-| Flat importance scores | `memory_quality` pass after migration |
-| General entity labels | `memory_quality` re-classifies with 50+ patterns |
+| Flat importance scores | Embedding-based re-rating via `memory_quality` |
+| General entity labels | Embedding-based re-classification via `memory_quality` |
+| No API key | Format-based fallback classifier (basic but functional) |
 
 ---
 
@@ -284,8 +317,9 @@ memory-engine/
 │   ├── backup.js             # Export / import
 │   ├── store-sqlite.js       # SQLite backend (FTS5)
 │   ├── dashboard.js          # HTML dashboard generator
-│   ├── quality.js            # Data quality: entity + importance + graph
-│   └── auto-capture.js       # Passive hooks: message → archival
+│   ├── classifier.js          # Embedding-based entity + importance classification
+│   ├── quality.js             # Data quality pass (uses classifier)
+│   └── auto-capture.js        # Passive hooks: message → archival (uses classifier)
 ├── extras/
 │   ├── memory-maintenance.sh
 │   ├── migrate-legacy.mjs
