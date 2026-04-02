@@ -323,13 +323,32 @@ export default definePluginEntry({
         const old = records[idx].content;
         records[idx].content = params.content;
         records[idx].updated_at = new Date().toISOString();
-        if (params.entity !== undefined) records[idx].entity = params.entity;
+
+        // Re-classify if entity not explicitly provided
+        if (params.entity !== undefined) {
+          records[idx].entity = params.entity;
+        } else {
+          const { classify } = await import("./lib/classifier.js");
+          const cls = await classify(params.content, wsp);
+          if (cls.entity !== "general") records[idx].entity = cls.entity;
+          records[idx].importance = cls.importance;
+          // Reuse embedding for indexing
+          if (cls.embedding) {
+            const embCache = loadEmbeddingCache(wsp);
+            embCache[params.id] = cls.embedding;
+            saveEmbeddingCache(wsp);
+          }
+        }
         if (params.tags !== undefined) records[idx].tags = params.tags;
         rewriteArchival(wsp, records);
-        const embCache = loadEmbeddingCache(wsp);
-        delete embCache[params.id];
-        saveEmbeddingCache(wsp);
-        indexEmbedding(wsp, records[idx]).catch(() => {});
+
+        // Re-embed if classify didn't already do it
+        if (params.entity !== undefined) {
+          const embCache = loadEmbeddingCache(wsp);
+          delete embCache[params.id];
+          saveEmbeddingCache(wsp);
+          indexEmbedding(wsp, records[idx]).catch(() => {});
+        }
         return text(`OK: Updated ${params.id}. Old: "${old.slice(0, 60)}..." → New: "${params.content.slice(0, 60)}..."`);
       },
     })));

@@ -32,6 +32,14 @@
       "message": "Run memory_dashboard to regenerate the HTML dashboard. Do NOT output anything to the main chat.",
       "model": "anthropic/claude-sonnet-4-6",
       "description": "Daily dashboard refresh at 9:30am"
+    },
+    {
+      "id": "memory-graph-weekly",
+      "schedule": "0 5 * * 0",
+      "agent": "main",
+      "message": "Review the last 50 archival records via archival_search. For any that describe clear relationships between entities (person owns thing, person works at place, person has condition, etc.), add them via graph_add. Only add relationships you are confident about. Do NOT output anything to the main chat. Send summary to notify bot.",
+      "model": "anthropic/claude-sonnet-4-6",
+      "description": "Weekly: LLM-based graph triple extraction from recent archival"
     }
   ]
 }
