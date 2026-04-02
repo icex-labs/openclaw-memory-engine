@@ -384,22 +384,53 @@ except:
 
   echo "  Agents found: $AGENTS"
 
-  # Register main agent crons (shared across all agents using default workspace)
-  register_cron "memory-reflect-daily" "0 9 * * *" "main" \
-    "Run memory_reflect with window_days=7. If you notice patterns, store via archival_insert with tags=['reflection']. Do NOT output to main chat." \
-    "Daily reflection: analyze memory patterns"
+  # Register crons from JSON definition file (single source of truth)
+  CRON_JSON="$PLUGIN_DIR/extras/auto-consolidation-crons.json"
+  if [ -f "$CRON_JSON" ] && command -v python3 &>/dev/null; then
+    python3 -c "
+import json, subprocess, sys
 
-  register_cron "memory-consolidate-6h" "0 */6 * * *" "main" \
-    "Read today's daily log. If it has content not in archival, run memory_consolidate. Then archival_stats. Do NOT output to main chat." \
-    "Auto-consolidate daily logs every 6 hours"
+with open('$CRON_JSON') as f:
+    crons = json.load(f).get('crons', [])
 
-  register_cron "memory-dedup-weekly" "0 4 * * 0" "main" \
-    "Run archival_deduplicate with apply=true. Then archival_stats. Do NOT output to main chat." \
-    "Weekly dedup: clean near-duplicate records"
+existing = '''$EXISTING_CRONS'''
+tz = '''$TZ_IANA'''
 
-  register_cron "memory-dashboard-daily" "30 9 * * *" "main" \
-    "Run memory_dashboard to regenerate the HTML dashboard. Do NOT output to main chat." \
-    "Daily dashboard refresh for main agent" 30000
+for c in crons:
+    name = c['id']
+    if name in existing:
+        print(f'⏭️  Cron \"{name}\" already exists')
+        continue
+    agent = c.get('agent', 'main')
+    cmd = [
+        'openclaw', 'cron', 'add',
+        '--name', name,
+        '--cron', c['schedule'],
+        '--tz', tz,
+        '--agent', agent,
+        '--session', 'isolated',
+        '--model', c.get('model', 'anthropic/claude-sonnet-4-6'),
+        '--message', c['message'],
+        '--description', c.get('description', ''),
+        '--timeout', '60000',
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        print(f'✅ Cron \"{name}\" ({agent}) registered')
+    else:
+        print(f'⚠️  Cron \"{name}\" failed (gateway not running?)')
+" 2>/dev/null
+  else
+    echo "⚠️  Cron JSON not found or python3 missing — registering defaults manually"
+    register_cron "memory-reflect-daily" "0 9 * * *" "main" \
+      "Run memory_reflect. Do NOT output to main chat." "Daily reflection"
+    register_cron "memory-consolidate-6h" "0 */6 * * *" "main" \
+      "Run memory_consolidate on today's daily log. Do NOT output to main chat." "Auto-consolidate"
+    register_cron "memory-dedup-weekly" "0 4 * * 0" "main" \
+      "Run archival_deduplicate with apply=true. Do NOT output to main chat." "Weekly dedup"
+    register_cron "memory-dashboard-daily" "30 9 * * *" "main" \
+      "Run memory_dashboard. Do NOT output to main chat." "Dashboard refresh" 30000
+  fi
 
   # Register per-agent crons for agents with separate workspaces
   STAGGER=0
@@ -441,7 +472,22 @@ else
   echo "⚠️  openclaw CLI not found — skipping cron registration"
 fi
 
-# --- 9. Validate config ---
+# --- 9. Track installed version ---
+INSTALLED_VERSION=$(python3 -c "
+import json
+with open('$PLUGIN_DIR/package.json') as f: print(json.load(f).get('version','unknown'))
+" 2>/dev/null || echo "unknown")
+PREV_VERSION=""
+VERSION_FILE="$MEMORY_DIR/.memory-engine-version"
+[ -f "$VERSION_FILE" ] && PREV_VERSION=$(cat "$VERSION_FILE")
+echo "$INSTALLED_VERSION" > "$VERSION_FILE"
+
+if [ -n "$PREV_VERSION" ] && [ "$PREV_VERSION" != "$INSTALLED_VERSION" ]; then
+  echo ""
+  echo "📦 Upgraded: $PREV_VERSION → $INSTALLED_VERSION"
+fi
+
+# --- 10. Validate config ---
 echo ""
 if command -v openclaw &>/dev/null; then
   openclaw config validate 2>&1 && echo "✅ Config valid" || echo "❌ Config validation failed"
